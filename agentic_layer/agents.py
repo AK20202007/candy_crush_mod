@@ -23,6 +23,8 @@ HAZARD_LABELS = {
     "person",
     "chair",
     "bench",
+    "dining table",
+    "couch",
     "traffic cone",
     "pothole",
     "door",
@@ -165,7 +167,9 @@ class SafetyAgent(BaseAgent):
         hazards: List[Detection] = []
         for det in ctx.detections:
             label = det.label.lower()
-            if label not in HAZARD_LABELS or det.confidence < 0.50:
+            partial_edge = _is_partial_edge_detection(det)
+            min_confidence = 0.42 if partial_edge else 0.50
+            if label not in HAZARD_LABELS or det.confidence < min_confidence:
                 continue
             close = det.distance_m is not None and det.distance_m <= 1.4
             large = float(det.attributes.get("area_ratio", 0.0) or 0.0) >= 0.12
@@ -175,23 +179,140 @@ class SafetyAgent(BaseAgent):
                 Direction.SLIGHT_RIGHT,
                 Direction.UNKNOWN,
             }
-            if centered and (close or large):
+            if (centered and (close or large)) or _partial_edge_hazard(det):
                 hazards.append(det)
 
         if hazards and ctx.motion.is_moving:
             det = sorted(hazards, key=_hazard_sort_key)[0]
-            is_stop = det.label.lower() in STOP_HAZARDS or (det.distance_m is not None and det.distance_m <= 0.8)
+            partial_edge = _is_partial_edge_detection(det)
+            is_stop = (
+                det.label.lower() in STOP_HAZARDS
+                or (det.distance_m is not None and det.distance_m <= 0.8)
+                or _partial_edge_requires_stop(det)
+            )
+            subject = f"partially visible {det.label}" if partial_edge else det.label
             return AgentDecision(
                 action=AgentAction.WARN,
-                priority=95 if is_stop else 80,
+                priority=95 if is_stop else 82 if partial_edge else 80,
                 message=(
-                    f"{'Stop' if is_stop else 'Caution'}: {det.label} "
-                    f"{_direction_phrase(det.direction)}, {_distance_phrase(det.distance_m)}."
+                    f"{'Stop' if is_stop else 'Caution'}: {subject} "
+                    f"{_direction_phrase(det.direction)}, {_detection_distance_phrase(det)}."
                 ),
                 haptic=_haptic_for_direction(det.direction, urgent=is_stop),
-                agents_consulted=[self.name, "object_distance"],
-                debug={"detection": det.model_dump(), "reason": "object-distance hazard"},
+                agents_consulted=[self.name, "partial_edge" if partial_edge else "object_distance"],
+                debug={
+                    "detection": det.model_dump(),
+                    "reason": "partial-edge object-distance hazard" if partial_edge else "object-distance hazard",
+                },
             )
+
+        # Universal proximity warning: ANY object within immediate range triggers a stop
+        # This catches unknown obstacles (pillars, walls, luggage) not in HAZARD_LABELS
+        # Uses lower confidence for very close objects to catch partial detections
+        if ctx.motion.is_moving:
+            immediate: List[Detection] = []
+            for det in ctx.detections:
+                # Skip known hazards (already handled above) to avoid duplicate processing
+                if det.label.lower() in HAZARD_LABELS:
+                    continue
+                partial_edge = _is_partial_edge_detection(det)
+                # Only consider objects directly ahead (center/slight-left/slight-right)
+                centered = det.direction in {Direction.CENTER, Direction.SLIGHT_LEFT, Direction.SLIGHT_RIGHT, Direction.UNKNOWN}
+                if not centered and not _partial_edge_hazard(det):
+                    continue
+                # Use configurable proximity threshold (default 1.0m)
+                threshold_m = 1.4 if partial_edge else 1.0  # TODO: Pass VisionConfig to agents for configurable threshold
+                close = det.distance_m is not None and det.distance_m <= threshold_m
+                if not close and not _partial_edge_hazard(det):
+                    continue
+                # Exclude tiny detections (likely false positives)
+                area_ratio = float(det.attributes.get("area_ratio", 0.0) or 0.0)
+                not_tiny = area_ratio >= (0.015 if partial_edge else 0.02)
+                if not not_tiny:
+                    continue
+                # Tiered confidence: lower threshold for very close objects (partial detections)
+                # Very close (≤0.6m): accept confidence ≥0.30 (catches partial chairs, table edges)
+                # Close (0.6-1.0m): require confidence ≥0.60 (reduces false positives)
+                very_close = det.distance_m is not None and det.distance_m <= 0.6
+                min_confidence = 0.30 if very_close else 0.40 if partial_edge else 0.60
+                if det.confidence < min_confidence:
+                    continue
+                immediate.append(det)
+
+            if immediate:
+                # Sort by distance (closest first)
+                det = sorted(immediate, key=lambda d: d.distance_m if d.distance_m is not None else 99)[0]
+                partial_edge = _is_partial_edge_detection(det)
+                subject = f"partially visible {det.label}" if partial_edge else det.label
+                return AgentDecision(
+                    action=AgentAction.WARN,
+                    priority=95,  # Always stop for immediate unknown obstacles
+                    message=(
+                        f"Stop: {subject} {_direction_phrase(det.direction)}, "
+                        f"{_detection_distance_phrase(det)}."
+                    ),
+                    haptic=_haptic_for_direction(det.direction, urgent=True),
+                    agents_consulted=[self.name, "partial_edge" if partial_edge else "universal_proximity"],
+                    debug={
+                        "detection": det.model_dump(),
+                        "reason": "partial-edge-universal-proximity" if partial_edge else "universal-proximity-immediate",
+                    },
+                )
+
+        # Check for edge-based obstacle detection (walls, pillars, boxes YOLO missed)
+        if ctx.motion.is_moving:
+            for surface in ctx.surfaces:
+                if surface.kind == SurfaceKind.OBSTACLE_EDGE:
+                    # Only trigger if confident and close enough
+                    if surface.confidence >= 0.5 and surface.distance_m is not None and surface.distance_m <= 1.2:
+                        priority = 95 if surface.distance_m <= 0.8 else 85
+                        message = (
+                            f"Stop: partially visible obstacle {_direction_phrase(surface.direction)} "
+                            f"{_distance_phrase(surface.distance_m)}."
+                        )
+                        return AgentDecision(
+                            action=AgentAction.WARN,
+                            priority=priority,
+                            message=message,
+                            haptic=HapticPattern.STOP if priority >= 95 else HapticPattern.CAUTION,
+                            agents_consulted=[self.name, "edge_density"],
+                            debug={
+                                "surface": surface.model_dump(),
+                                "reason": "edge-density-obstacle",
+                            },
+                        )
+
+        # Door detection and specific instructions
+        if ctx.motion.is_moving:
+            for surface in ctx.surfaces:
+                if surface.kind == SurfaceKind.DOOR:
+                    if surface.confidence >= 0.6 and surface.distance_m is not None:
+                        handle_side = str(surface.attributes.get("handle_side", "unknown"))
+                        if surface.distance_m <= 1.5:
+                            return AgentDecision(
+                                action=AgentAction.GUIDE,
+                                priority=76 if surface.attributes.get("handle_detected") else 72,
+                                message=_door_guidance_message(surface),
+                                haptic=_door_haptic(surface),
+                                agents_consulted=[self.name, "door_detection"],
+                                debug={
+                                    "surface": surface.model_dump(),
+                                    "reason": "door-handle-guidance" if surface.attributes.get("handle_detected") else "door-frame-guidance",
+                                },
+                            )
+                        elif surface.distance_m <= 3.0:
+                            # Farther door - just announce it
+                            return AgentDecision(
+                                action=AgentAction.GUIDE,
+                                priority=60,
+                                message=_door_approach_message(surface),
+                                haptic=_door_haptic(surface) if handle_side in {"left", "right"} else HapticPattern.NONE,
+                                agents_consulted=[self.name, "door_detection"],
+                                debug={
+                                    "surface": surface.model_dump(),
+                                    "reason": "door-detection-announce",
+                                },
+                            )
 
         if ctx.scene.location_type == "street_crossing":
             return AgentDecision(
@@ -431,6 +552,102 @@ class OrientationAgent(BaseAgent):
         )
 
 
+class IndoorNavigationAgent(BaseAgent):
+    """Combines indoor routing with obstacle detection to provide rerouting guidance.
+
+    When an obstacle (chair, table, person, etc.) is detected on the current
+    path direction, this agent suggests avoidance maneuvers or alternate routes.
+    Priority 68 — below safety (80-100) but close to wayfinding (60).
+    """
+
+    name = "indoor_navigation"
+
+    # Labels to IGNORE for indoor avoidance (not physical obstacles)
+    NON_OBSTACLE_LABELS = {"traffic light", "stop sign", "fire hydrant", "parking meter", "backpack", "handbag", "suitcase", "tie", "umbrella"}
+
+    def handle(self, ctx: FrameContext) -> Optional[AgentDecision]:
+        if ctx.scene.location_type not in {"hallway", "room", "corridor", "building", "indoor", "unknown"}:
+            return None
+
+        if ctx.user.mode == "orientation" or not ctx.motion.is_moving:
+            return None
+
+        # Defer to TargetFindingAgent when the user is actively searching
+        if ctx.user.target or ctx.user.query:
+            return None
+
+        # Check for doors and provide hand guidance
+        for surface in ctx.surfaces:
+            if surface.kind == SurfaceKind.DOOR and surface.confidence >= 0.6:
+                if surface.distance_m is not None and surface.distance_m <= 2.0:
+                    return AgentDecision(
+                        action=AgentAction.GUIDE,
+                        priority=72,
+                        message=_door_guidance_message(surface),
+                        haptic=_door_haptic(surface),
+                        agents_consulted=[self.name, "door_guidance"],
+                        debug={
+                            "surface": surface.model_dump(),
+                            "reason": "door-handle-guidance" if surface.attributes.get("handle_detected") else "door-frame-guidance",
+                        },
+                    )
+
+        blocking: List[Detection] = []
+        for det in ctx.detections:
+            if det.label.lower() in self.NON_OBSTACLE_LABELS:
+                continue
+            if det.confidence < 0.50:
+                continue
+            ahead = det.direction in {Direction.CENTER, Direction.SLIGHT_LEFT, Direction.SLIGHT_RIGHT}
+            close = det.distance_m is not None and det.distance_m <= 3.0
+            if ahead and close:
+                blocking.append(det)
+
+        if not blocking:
+            return None
+
+        blocking.sort(key=lambda d: (d.distance_m if d.distance_m is not None else 99, -d.confidence))
+        nearest = blocking[0]
+
+        # Suggest avoidance direction
+        if nearest.direction == Direction.SLIGHT_LEFT or nearest.direction == Direction.CENTER:
+            avoid_dir = "right"
+            avoid_haptic = HapticPattern.RIGHT
+        else:
+            avoid_dir = "left"
+            avoid_haptic = HapticPattern.LEFT
+
+        obstacle_list = ", ".join(sorted({d.label.lower() for d in blocking}))
+        distance = _distance_phrase(nearest.distance_m)
+
+        if nearest.distance_m is not None and nearest.distance_m <= 1.0:
+            return AgentDecision(
+                action=AgentAction.WARN,
+                priority=78,
+                message=f"Indoor obstacle: {nearest.label} {_direction_phrase(nearest.direction)}, {distance}. Move {avoid_dir} to go around.",
+                haptic=avoid_haptic,
+                agents_consulted=[self.name],
+                debug={
+                    "blocking_objects": [d.model_dump() for d in blocking],
+                    "avoidance_direction": avoid_dir,
+                    "reason": "indoor-obstacle-close",
+                },
+            )
+
+        return AgentDecision(
+            action=AgentAction.GUIDE,
+            priority=68,
+            message=f"{nearest.label.capitalize()} ahead {_direction_phrase(nearest.direction)}, {distance}. Veer {avoid_dir} to avoid.",
+            haptic=avoid_haptic,
+            agents_consulted=[self.name],
+            debug={
+                "blocking_objects": [d.model_dump() for d in blocking],
+                "avoidance_direction": avoid_dir,
+                "reason": "indoor-obstacle-avoidance",
+            },
+        )
+
+
 class FallbackAgent(BaseAgent):
     name = "fallback"
 
@@ -618,6 +835,97 @@ def _best_walkable_surface(surfaces: Iterable[SurfaceObservation]) -> Optional[S
 
 def _surface_ahead(surface: SurfaceObservation) -> bool:
     return surface.direction in {Direction.CENTER, Direction.SLIGHT_LEFT, Direction.SLIGHT_RIGHT, Direction.UNKNOWN}
+
+
+def _door_haptic(surface: SurfaceObservation) -> HapticPattern:
+    hand = str(surface.attributes.get("recommended_hand", "")).lower()
+    side = str(surface.attributes.get("handle_side", "")).lower()
+    cue = hand if hand in {"left", "right"} else side
+    if cue == "left":
+        return HapticPattern.LEFT
+    if cue == "right":
+        return HapticPattern.RIGHT
+    return HapticPattern.CAUTION
+
+
+def _door_approach_message(surface: SurfaceObservation) -> str:
+    if surface.attributes.get("handle_detected"):
+        side = str(surface.attributes.get("handle_side", "ahead")).replace("_", " ")
+        height = str(surface.attributes.get("handle_height_zone", "hand height"))
+        return (
+            f"Door handle {side} {_direction_phrase(surface.direction)}, {height}, "
+            f"{_distance_phrase(surface.distance_m)}."
+        )
+    return f"Door {_direction_phrase(surface.direction)} {_distance_phrase(surface.distance_m)}. I do not see the handle yet."
+
+
+def _door_guidance_message(surface: SurfaceObservation) -> str:
+    distance = _distance_phrase(surface.distance_m)
+    if not surface.attributes.get("handle_detected"):
+        return f"Door ahead {distance}. I do not see the handle; stop, scan the door edge, then find the handle by touch."
+
+    side = str(surface.attributes.get("handle_side", "ahead")).replace("_", " ")
+    hand = str(surface.attributes.get("recommended_hand", "either hand")).replace("_", " ")
+    height = str(surface.attributes.get("handle_height_zone", "hand height"))
+    action = str(
+        surface.attributes.get(
+            "handle_action",
+            "use the handle, then gently test whether the door pushes or pulls",
+        )
+    )
+    return f"Door handle on the {side}, {height}, {distance}. Use your {hand}; {action}."
+
+
+def _edge_contact_sides(det: Detection) -> set[str]:
+    raw = det.attributes.get("edge_contact") or []
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",")]
+    try:
+        return {str(side).lower() for side in raw if side}
+    except TypeError:
+        return set()
+
+
+def _is_partial_edge_detection(det: Detection) -> bool:
+    if bool(det.attributes.get("edge_truncated")):
+        return True
+    return str(det.attributes.get("partial_visibility", "")).lower() == "frame_edge"
+
+
+def _partial_edge_hazard(det: Detection) -> bool:
+    if not _is_partial_edge_detection(det):
+        return False
+
+    sides = _edge_contact_sides(det)
+    if not sides.intersection({"left", "right", "bottom"}):
+        return False
+
+    area_ratio = float(det.attributes.get("area_ratio", 0.0) or 0.0)
+    bottom_y_ratio = float(det.attributes.get("bottom_y_ratio", 0.0) or 0.0)
+    close = det.distance_m is not None and det.distance_m <= 1.6
+    large_partial = area_ratio >= 0.035
+    low_in_frame = bottom_y_ratio >= 0.82 and area_ratio >= 0.015
+    side_intrusion = bool(sides.intersection({"left", "right"})) and area_ratio >= 0.020
+    bottom_intrusion = "bottom" in sides and area_ratio >= 0.018
+    return (close and (large_partial or low_in_frame or side_intrusion)) or bottom_intrusion
+
+
+def _partial_edge_requires_stop(det: Detection) -> bool:
+    if not _partial_edge_hazard(det):
+        return False
+    sides = _edge_contact_sides(det)
+    area_ratio = float(det.attributes.get("area_ratio", 0.0) or 0.0)
+    bottom_y_ratio = float(det.attributes.get("bottom_y_ratio", 0.0) or 0.0)
+    close = det.distance_m is not None and det.distance_m <= 0.9
+    return close or ("bottom" in sides and area_ratio >= 0.025) or (bottom_y_ratio >= 0.90 and area_ratio >= 0.025)
+
+
+def _detection_distance_phrase(det: Detection) -> str:
+    if not _is_partial_edge_detection(det):
+        return _distance_phrase(det.distance_m)
+    if det.distance_m is not None and det.distance_m <= 1.4:
+        return "likely nearby; distance is uncertain"
+    return "distance is uncertain"
 
 
 def _warning_message(subject: str, direction: Direction, distance_m: Optional[float]) -> str:

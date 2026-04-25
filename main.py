@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import os
 import threading
+from pathlib import Path
 from typing import Optional
 
 from agentic_layer import AgentAction, AgentDecision, AgenticNavigationRouter, MotionState, RouteState, UserState
@@ -78,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--confirm-frames", type=int, default=None, help="Override profile consecutive frames before warning.")
     parser.add_argument("--augment", action="store_true", help="Enable test-time augmentation.")
     parser.add_argument("--no-half", action="store_true", help="Disable FP16 inference on CUDA.")
+    parser.add_argument("--camera-mount", type=str, default="hand", choices=["head", "hand"], help="Camera mount position: 'head' for glasses/head-mounted, 'hand' for phone (default: hand).")
     parser.add_argument("--origin", type=str, default=None, help='Walking start as "longitude,latitude" for ORS routing.')
     parser.add_argument("--destination", type=str, default=None, help="Destination text for non-interactive runs; skips voice capture.")
     parser.add_argument("--typed-destination", action="store_true", help="Use the old terminal destination prompt instead of voice capture.")
@@ -310,7 +312,12 @@ def main() -> None:
         location_type=choose(args.location_type, profile.location_type),
         visual_confidence=choose(args.visual_confidence, profile.visual_confidence),
         distance_scale=choose(args.distance_scale, profile.distance_scale),
+        camera_mount=args.camera_mount,
     )
+    if vcfg.is_head_mounted:
+        print(f"[main] Head-mounted mode: surface_y={vcfg.surface_y_start:.2f} "
+              f"curb_y={vcfg.curb_y_range} area_ratio={vcfg.effective_obstacle_area_ratio:.3f} "
+              f"distance_scale={vcfg.effective_distance_scale:.2f}")
 
     vision = VisionSystem(
         on_decision=handle_decision,
