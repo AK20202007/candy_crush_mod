@@ -179,137 +179,217 @@ class NavigationApp:
             traceback.print_exc()
             return False
     
-    def get_destination(self, args) -> Optional[str]:
-        """Get destination from user via voice or text input."""
-        if args.destination:
-            return args.destination
-        
-        if args.typed_destination or not VOICE_INPUT_AVAILABLE:
-            # Text input
-            print("\n[system] Enter destination (or 'quit' to exit):")
+    def _listen_for_destination(self, prompt: str = "Where would you like to go?", timeout: float = 6.0) -> Optional[str]:
+        """
+        Speak a prompt then record audio and transcribe via ElevenLabs STT.
+        Returns the transcribed text or None on failure.
+        """
+        import sounddevice as sd
+        import numpy as np
+        import wave
+        import tempfile
+        import requests
+
+        api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+        if not api_key:
+            print("[system] No ElevenLabs API key — falling back to text input")
+            print(f"[system] {prompt}")
             try:
-                destination = input("> ").strip()
-                if destination.lower() in ['quit', 'exit', 'q']:
-                    return None
-                return destination if destination else None
+                return input("> ").strip() or None
             except EOFError:
                 return None
-        else:
-            # Voice input
-            print("\n[system] Listening for destination...")
-            print("[system] Say your destination clearly after the beep")
-            
-            try:
-                config = DestinationCaptureConfig(
-                    timeout_s=args.voice_timeout,
-                    locale=args.voice_locale
-                )
-                destination = capture_destination_by_voice(config)
-                return destination
-            except VoiceInputError as e:
-                print(f"[system] Voice input failed: {e}")
-                print("[system] Falling back to text input")
-                return self.get_destination(argparse.Namespace(
-                    destination=None,
-                    typed_destination=True,
-                    voice_timeout=args.voice_timeout,
-                    voice_locale=args.voice_locale
-                ))
 
-    def verify_destination(self, raw_destination: str) -> Optional[str]:
+        # Speak the prompt
+        if self.interface:
+            self.interface.speak_info(prompt)
+            time.sleep(4)  # Wait for TTS to finish fully
+            self.interface.speech.clear_queues()
+
+        try:
+            sd.stop()
+        except Exception:
+            pass
+        time.sleep(0.3)
+
+        print(f"\n[system] 🎤 Listening... (speak now)")
+
+        samplerate = 16000
+        recording = sd.rec(int(samplerate * timeout), samplerate=samplerate, channels=1, dtype=np.int16)
+        sd.wait()
+
+        # Write to temp wav
+        temp_path = tempfile.mktemp(suffix=".wav")
+        with wave.open(temp_path, 'wb') as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(samplerate)
+            wf.writeframes(recording.tobytes())
+
+        try:
+            with open(temp_path, 'rb') as f:
+                response = requests.post(
+                    "https://api.elevenlabs.io/v1/speech-to-text",
+                    headers={"xi-api-key": api_key},
+                    data={"model_id": "scribe_v1"},
+                    files={"file": f},
+                    timeout=15,
+                    verify=False,  # macOS SSL workaround
+                )
+            text = response.json().get("text", "").strip() if response.status_code == 200 else ""
+            print(f"[system] Heard: '{text}'")
+            return text if text else None
+        except Exception as e:
+            print(f"[system] STT error: {e}")
+            return None
+        finally:
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+    def get_destination(self, args) -> Optional[str]:
+        """Get raw destination text from CLI arg or via voice/text prompt."""
+        if args.destination:
+            return args.destination
+
+        # No CLI destination — ask via voice
+        result = self._listen_for_destination("Where would you like to go?")
+        if result:
+            return result
+
+        # Voice failed — fall back to text
+        print("\n[system] Enter destination (or 'quit' to exit):")
+        try:
+            text = input("> ").strip()
+            return None if text.lower() in ('quit', 'exit', 'q', '') else text
+        except EOFError:
+            return None
+
+    def verify_destination(self, raw_destination: str) -> Optional[dict]:
         """
         Look up the destination on Google Maps, announce it via audio,
-        and wait for the user to confirm before proceeding.
-        
-        Returns the verified destination name, or None if rejected.
+        listen for spoken yes/no confirmation.
+
+        Returns a dict with:
+            name       - verified place name
+            address    - full formatted address
+            lat        - latitude (float or None)
+            lng        - longitude (float or None)
+        or None if the user rejected.
         """
         print(f"[system] Looking up '{raw_destination}' on Google Maps...")
-        
+
         result = search_destination(raw_destination)
-        
-        if result is None:
-            msg = f"Sorry, I could not find {raw_destination} on the map. Please try again."
+        if not result:
+            msg = f"Sorry, I could not find {raw_destination}. Please try again."
             print(f"[system] {msg}")
             if self.interface:
                 self.interface.speak_warning(msg)
-                time.sleep(3)  # Let TTS finish
+                time.sleep(3)
             return None
-        
-        # Announce what we found
+
+        # Build and speak confirmation message
         confirm_msg = format_confirmation_message(result)
         print(f"[system] {confirm_msg}")
-        
         if self.interface:
             self.interface.speak_info(confirm_msg)
-            # Wait for TTS to fully finish playing before starting microphone
-            time.sleep(8)
-            # Clear any leftover audio state
+            time.sleep(8)  # Wait for full TTS playback
             self.interface.speech.clear_queues()
-        
-        # Wait for voice confirmation
-        confirmed = get_voice_confirmation()
-        
+
+        # Listen for yes/no
+        response = self._listen_for_destination(
+            "Please say yes to confirm or no to try again.",
+            timeout=4.0
+        )
+
+        yes_words = {"yes", "yeah", "yep", "correct", "confirm", "ok", "okay", "sure", "right", "affirmative"}
+        no_words = {"no", "nope", "nah", "wrong", "incorrect", "change", "cancel"}
+        text_lower = (response or "").lower()
+
+        confirmed = any(w in text_lower for w in yes_words)
+        rejected = any(w in text_lower for w in no_words)
+
+        if not confirmed and not rejected:
+            # Couldn't understand — fall back to text
+            print("\n[system] Didn't catch that. Type 'yes' to confirm or 'no' to re-enter:")
+            try:
+                typed = input("> ").strip().lower()
+                confirmed = typed in ("yes", "y")
+            except EOFError:
+                confirmed = False
+
         if confirmed:
-            verified_name = result.get("name", raw_destination)
-            print(f"[system] Destination confirmed: {verified_name}")
+            print(f"[system] ✓ Destination confirmed: {result['name']} | {result['address']} | lat={result['lat']} lng={result['lng']}")
             if self.interface:
-                self.interface.speak_info(f"Great. Starting navigation to {verified_name}.")
+                self.interface.speak_info(f"Great. Starting navigation to {result['name']}.")
                 time.sleep(2)
-            return verified_name
+            return result
         else:
-            print("[system] Destination rejected. Please enter a new one.")
+            print("[system] Destination rejected. Please try again.")
             if self.interface:
-                self.interface.speak_info("OK, please enter a different destination.")
+                self.interface.speak_info("OK, let me know where you would like to go.")
                 time.sleep(2)
             return None
-    
+
     def run(self, args) -> int:
         """Main application loop."""
         if not self.initialize(args):
             return 1
-        
+
         self.setup_signal_handlers()
         self.is_running = True
         self._start_time = time.time()
-        
+
+        # Final confirmed destination data
+        self.confirmed_destination: Optional[dict] = None
+
         try:
-            # Main loop
             while not self.stop_event.is_set():
-                # Get raw destination input
+                # Get raw destination input (voice or CLI)
                 raw_destination = self.get_destination(args)
-                
+
                 if raw_destination is None:
                     print("[system] No destination provided, exiting")
                     break
-                
-                # Verify destination via Google Maps + audio confirmation
-                # Keep asking until user confirms or quits
-                verified_destination = None
-                while verified_destination is None and not self.stop_event.is_set():
-                    verified_destination = self.verify_destination(raw_destination)
-                    if verified_destination is None:
+
+                # Keep asking until user verbally confirms
+                destination_data = None
+                while destination_data is None and not self.stop_event.is_set():
+                    destination_data = self.verify_destination(raw_destination)
+                    if destination_data is None:
                         # Ask for a new destination
-                        raw_destination = self.get_destination(argparse.Namespace(
-                            destination=None,
-                            typed_destination=True,
-                            voice_timeout=getattr(args, 'voice_timeout', 8.0),
-                            voice_locale=getattr(args, 'voice_locale', 'en_US')
-                        ))
+                        raw_destination = self._listen_for_destination("Where would you like to go?")
+                        if raw_destination is None:
+                            # Voice failed — text fallback
+                            print("\n[system] Enter destination (or 'quit' to exit):")
+                            try:
+                                raw_destination = input("> ").strip() or None
+                            except EOFError:
+                                raw_destination = None
                         if raw_destination is None:
                             break
-                
-                if verified_destination is None:
+
+                if destination_data is None:
                     print("[system] No destination confirmed, exiting")
                     break
-                
-                # NOW start navigation with the confirmed destination
-                print(f"\n[system] Starting navigation to: {verified_destination}")
-                self.interface.set_destination(verified_destination)
-                
-                # Run vision system (obstacle detection starts HERE, not before)
+
+                # Store confirmed destination with all data
+                self.confirmed_destination = destination_data
+                destination_name = destination_data["name"]
+                destination_address = destination_data["address"]
+                destination_lat = destination_data["lat"]
+                destination_lng = destination_data["lng"]
+
+                print(f"\n[system] Starting navigation to: {destination_name}")
+                print(f"[system]   Address : {destination_address}")
+                print(f"[system]   Coords  : lat={destination_lat}, lng={destination_lng}")
+
+                self.interface.set_destination(destination_name)
+
+                # NOW start vision + obstacle detection
                 print("[system] Starting vision system...")
-                print("[system] Press Ctrl+C to stop, or say 'stop'")
-                
+                print("[system] Press Ctrl+C to stop")
+
                 try:
                     frames = self.vision.run_forever(
                         camera_index=args.camera,
@@ -320,12 +400,10 @@ class NavigationApp:
                 except KeyboardInterrupt:
                     print("\n[system] Interrupted by user")
                     break
-                
-                # Clear destination and ask for new one
+
                 self.interface.clear_destination()
+                self.confirmed_destination = None
                 print("\n[system] Navigation ended. Set a new destination or Ctrl+C to quit")
-                
-                # Reset args.destination so we prompt again
                 args.destination = None
                 
         except Exception as e:
