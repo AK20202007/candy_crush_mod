@@ -26,6 +26,7 @@ from navigation import run_navigation_loop
 from routing import build_maps_route
 from speech import SpeechController
 from voice_input import DestinationCaptureConfig, VoiceInputError, capture_destination_by_voice, capture_destination_with_codeword
+from gps_location import LocationDetector
 from vision import VisionConfig, VisionSystem
 
 
@@ -92,6 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stop-word", type=str, default="stop", help="Word that ends continuous destination capture.")
     parser.add_argument("--no-codeword", action="store_true", help="Use one-shot spoken destination capture instead of codeword start/stop capture.")
     parser.add_argument("--allow-network-speech", action="store_true", help="Allow Apple Speech to use network recognition if on-device recognition is unavailable.")
+    parser.add_argument("--gps", type=str, default=None, help='GPS coordinates as "latitude,longitude" for indoor/outdoor auto-detection.')
 
     # Agentic layer knobs.
     parser.add_argument("--target", type=str, default=None, help="Object/search target, e.g. door, chair, elevator.")
@@ -193,6 +195,14 @@ def main() -> None:
     speech.start()
 
     destination = _get_destination(args, speech)
+
+    # GPS-based indoor/outdoor detection
+    gps_detector = LocationDetector.from_args(args.gps)
+    if gps_detector.has_gps:
+        gps_location = gps_detector.location_type_for_config
+        if args.location_type is None:
+            args.location_type = gps_location
+            print(f"[main] Auto-detected location type from GPS: {gps_location}")
 
     nav_route: Optional[list[str]] = None
     repeat_nav = True

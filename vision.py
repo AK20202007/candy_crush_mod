@@ -229,6 +229,8 @@ class VisionSystem:
         self._consec_warning_hits: Dict[str, int] = {}
         self._consec_door_hits: int = 0
         self._last_spoken: Optional[str] = None
+        self._frame_counter: int = 0
+        self._cached_surfaces: List[SurfaceObservation] = []
         
         # Vehicle tracking for speed and direction estimation
         self._vehicle_tracks: Dict[str, List[Dict]] = {}  # track_id -> list of detections
@@ -259,9 +261,17 @@ class VisionSystem:
         fps_frames = 0
         last_health_check = time.time()
 
+        # Reduce OpenCV buffer to 1 frame to minimize lag
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
         try:
             while stop_event is None or not stop_event.is_set():
                 try:
+                    # Drain stale buffered frames — only process the latest.
+                    # Grab+discard a few frames to clear the internal buffer,
+                    # then do a full read for the freshest frame.
+                    for _ in range(2):
+                        cap.grab()
                     ret, frame = cap.read()
                     if not ret:
                         print("[vision] Failed to read frame from webcam")
@@ -317,11 +327,19 @@ class VisionSystem:
     def _process_frame(self, frame: np.ndarray, w: int, h: int) -> AgentDecision:
         try:
             now_ms = int(time.time() * 1000)
+            self._frame_counter += 1
             detections = self._detect(frame, w, h)
             # Track vehicles to estimate speed and direction
             detections = self._track_vehicles(detections, now_ms)
             warnings = self._warnings_from_detections(detections, now_ms)
-            surfaces = self._surface_observations(frame, w, h) if self._cfg.enable_surface_heuristic else []
+            # Run expensive surface heuristics every other frame; reuse cache otherwise
+            if self._cfg.enable_surface_heuristic and (self._frame_counter % 2 == 0):
+                surfaces = self._surface_observations(frame, w, h, detections)
+                self._cached_surfaces = surfaces
+            elif self._cfg.enable_surface_heuristic:
+                surfaces = self._cached_surfaces
+            else:
+                surfaces = []
             for surface in surfaces:
                 self._draw_surface_observation(frame, surface)
             ctx = FrameContext(
@@ -616,7 +634,8 @@ class VisionSystem:
             det.attributes["signal_category"] = "pedestrian_signal"
             det.attributes["signal_state"] = _signal_state_from_label(label)
 
-    def _surface_observations(self, frame: np.ndarray, w: int, h: int) -> List[SurfaceObservation]:
+    def _surface_observations(self, frame: np.ndarray, w: int, h: int,
+                              detections: Optional[List[Detection]] = None) -> List[SurfaceObservation]:
         if w <= 0 or h <= 0:
             return []
 
@@ -656,15 +675,30 @@ class VisionSystem:
             import traceback
             traceback.print_exc()
 
-        # Door detection using vertical edge patterns
-        try:
-            door = self._detect_door(frame, w, h)
-            if door is not None:
-                observations.append(door)
-        except Exception as e:
-            print(f"[vision] Door detection error: {e}")
-            import traceback
-            traceback.print_exc()
+        # Suppress door handle detection when YOLO sees furniture (chair, bench, couch)
+        # — their handles/edges produce false-positive door handle scores.
+        _furniture_labels = {"chair", "bench", "couch", "dining table"}
+        has_furniture = detections and any(
+            d.label.lower() in _furniture_labels and d.confidence >= 0.40
+            for d in detections
+        )
+
+        is_outdoor = self._cfg.location_type in {"sidewalk", "street", "street_crossing", "outdoor"}
+        is_indoor = self._cfg.location_type in {"hallway", "room", "corridor", "building", "indoor"}
+
+        # Door detection — skip outdoors and when furniture is present
+        if not has_furniture and not is_outdoor:
+            try:
+                door = self._detect_door(frame, w, h)
+                if door is not None:
+                    observations.append(door)
+            except Exception as e:
+                print(f"[vision] Door detection error: {e}")
+                import traceback
+                traceback.print_exc()
+        else:
+            # Reset consecutive door counter when suppressed
+            self._consec_door_hits = 0
 
         # White object detection for low-contrast obstacles (white tables, boxes)
         try:
@@ -676,35 +710,37 @@ class VisionSystem:
             import traceback
             traceback.print_exc()
         
-        # Crosswalk detection using zebra stripe patterns
-        try:
-            crosswalk = self._detect_crosswalk(frame, w, h)
-            if crosswalk is not None:
-                observations.append(crosswalk)
-        except Exception as e:
-            print(f"[vision] Crosswalk detection error: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # Sidewalk boundary detection using edge density
-        try:
-            sidewalk_boundary = self._detect_sidewalk_boundary(frame, w, h)
-            if sidewalk_boundary is not None:
-                observations.append(sidewalk_boundary)
-        except Exception as e:
-            print(f"[vision] Sidewalk boundary detection error: {e}")
-            import traceback
-            traceback.print_exc()
-        
-        # Sidewalk obstacle detection (poles, signs, bollards)
-        try:
-            sidewalk_obstacles = self._detect_sidewalk_obstacles(frame, w, h)
-            for obs in sidewalk_obstacles:
-                observations.append(obs)
-        except Exception as e:
-            print(f"[vision] Sidewalk obstacle detection error: {e}")
-            import traceback
-            traceback.print_exc()
+        # Outdoor-only detections: skip indoors to avoid false positives and save CPU
+        if not is_indoor:
+            # Crosswalk detection using zebra stripe patterns
+            try:
+                crosswalk = self._detect_crosswalk(frame, w, h)
+                if crosswalk is not None:
+                    observations.append(crosswalk)
+            except Exception as e:
+                print(f"[vision] Crosswalk detection error: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # Sidewalk boundary detection using edge density
+            try:
+                sidewalk_boundary = self._detect_sidewalk_boundary(frame, w, h)
+                if sidewalk_boundary is not None:
+                    observations.append(sidewalk_boundary)
+            except Exception as e:
+                print(f"[vision] Sidewalk boundary detection error: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            # Sidewalk obstacle detection (poles, bollards)
+            try:
+                sidewalk_obstacles = self._detect_sidewalk_obstacles(frame, w, h)
+                for obs in sidewalk_obstacles:
+                    observations.append(obs)
+            except Exception as e:
+                print(f"[vision] Sidewalk obstacle detection error: {e}")
+                import traceback
+                traceback.print_exc()
 
         return observations
 
