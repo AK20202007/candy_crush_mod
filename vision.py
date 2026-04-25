@@ -45,7 +45,7 @@ class VisionConfig:
     # How close to image center (normalized 0–1) a person's bbox center must be.
     person_center_radius: float = 0.18
     # Minimum seconds between repeating the same warning phrase.
-    warning_cooldown_s: float = 2.5
+    warning_cooldown_s: float = 2.0
     # Require this many consecutive frames with the hazard before speaking (reduces flicker).
     confirm_frames: int = 2
     # Ultralytics predict: min confidence (higher = fewer false positives, may miss small objects).
@@ -286,6 +286,9 @@ class VisionSystem:
         self._on_warning = on_warning
         self._on_emergency = on_emergency
         self._cfg = config or VisionConfig()
+        
+        self._longitude: Optional[float] = None
+        self._latitude: Optional[float] = None
         self._model = None
         self._name_to_id: Dict[str, int] = {}
         self._active_classes: Set[str] = set()
@@ -306,6 +309,7 @@ class VisionSystem:
         )
         self._consec_person: int = 0
         self._consec_obstacle: int = 0
+        self._stuck_start_time: Optional[float] = None
 
         self._brightness_monitor = BrightnessMonitor(freq_threshold=self._cfg.strobe_freq)
         self._fall_detector = FallDetector(threshold=self._cfg.elevation_threshold)
@@ -313,6 +317,11 @@ class VisionSystem:
         self._smv_fall_detector = SignalMagnitudeFallDetector()
         
         self._emergency_triggered = False
+
+    def set_location(self, lon: float, lat: float) -> None:
+        """Update the current coordinates (from main.py / routing logic)."""
+        self._longitude = lon
+        self._latitude = lat
 
         use_half = self._cfg.half if self._cfg.half is not None else bool(torch.cuda.is_available())
         self._predict_half = bool(use_half and torch.cuda.is_available())
@@ -402,6 +411,118 @@ class VisionSystem:
 
         self._check_emergency_conditions()
 
+        # Obstacle Detection (YOLO)
+        if not self._model:
+            return
+
+        cfg = self._cfg
+        n_confirm = max(1, cfg.confirm_frames)
+
+        results = self._model.predict(
+            source=frame,
+            verbose=False,
+            stream=False,
+            conf=cfg.conf,
+            iou=cfg.iou,
+            imgsz=cfg.imgsz,
+            half=self._predict_half,
+            augment=cfg.augment,
+            max_det=cfg.max_det,
+            classes=self._class_ids,
+        )
+        if not results:
+            self._consec_person = 0
+            self._consec_obstacle = 0
+            return
+        
+        r0 = results[0]
+        if r0.boxes is None or len(r0.boxes) == 0:
+            self._consec_person = 0
+            self._consec_obstacle = 0
+            return
+
+        boxes = r0.boxes.xyxy.cpu().numpy()
+        clss = r0.boxes.cls.cpu().numpy().astype(int)
+        confs = r0.boxes.conf.cpu().numpy() if r0.boxes.conf is not None else None
+
+        frame_area = float(w * h)
+        cx_img, cy_img = w / 2.0, h / 2.0
+
+        person_center_hit = False
+        obstacle_close = False
+        obstacle_info: Optional[Tuple[str, float]] = None # (name, normalized_center_x)
+
+        for i, ((x1, y1, x2, y2), cls_id) in enumerate(zip(boxes, clss)):
+            name = self._model.names[int(cls_id)].lower()
+            if name not in self._active_classes:
+                continue
+
+            bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
+            area_ratio = (bw * bh) / frame_area
+            bx_c = (x1 + x2) / 2.0
+            by_c = (y1 + y2) / 2.0
+
+            if name == "person":
+                dx = (bx_c - cx_img) / w
+                dy = (by_c - cy_img) / h
+                dist = (dx * dx + dy * dy) ** 0.5
+                if dist < self._cfg.person_center_radius:
+                    person_center_hit = True
+            else:
+                # chair / car / door — treat large bbox as "close" obstacle.
+                if area_ratio >= self._cfg.obstacle_area_ratio:
+                    obstacle_close = True
+                    # Record the center of the largest/first close obstacle
+                    if obstacle_info is None:
+                        obstacle_info = (name, bx_c / w)
+
+            # Draw box and label.
+            color = (0, 200, 0) if name == "person" else (0, 165, 255)
+            p1 = (int(x1), int(y1))
+            p2 = (int(x2), int(y2))
+            cv2.rectangle(frame, p1, p2, color, 2)
+            conf_s = f" {float(confs[i]):.2f}" if confs is not None else ""
+            cv2.putText(frame, f"{name}{conf_s}", (int(x1), int(y1)-5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)
+
+        if person_center_hit:
+            self._consec_person += 1
+        else:
+            self._consec_person = 0
+        if obstacle_close:
+            self._consec_obstacle += 1
+        else:
+            self._consec_obstacle = 0
+
+        if self._consec_person >= n_confirm:
+            if self._maybe_warn("Watch out, person ahead"):
+                self._consec_person = 0
+        
+        if self._consec_obstacle >= n_confirm and obstacle_info:
+            name, center_x = obstacle_info
+            # center_x is 0.0 (left) to 1.0 (right)
+            if center_x < 0.4:
+                msg = f"Obstacle on left. Step right."
+            elif center_x > 0.6:
+                msg = f"Obstacle on right. Step left."
+            else:
+                msg = f"Obstacle directly ahead. Please swivel camera to find a path."
+            
+            if self._maybe_warn(msg):
+                self._consec_obstacle = 0
+
+        # "Dramatic decrease in distance without movement for 30 seconds"
+        # We use obstacle_close (large area_ratio) as a proxy for 'close distance'.
+        if obstacle_close:
+            if self._stuck_start_time is None:
+                self._stuck_start_time = time.time()
+            else:
+                duration = time.time() - self._stuck_start_time
+                if duration >= 30.0:
+                    self.trigger_emergency("STUCK NEAR OBSTACLE FOR 30S")
+                    self._stuck_start_time = None  # Reset after trigger
+        else:
+            self._stuck_start_time = None
+
     def trigger_emergency(self, reason: str) -> None:
         """Immediately trigger an emergency alert and call the contact."""
         if self._emergency_triggered:
@@ -409,7 +530,12 @@ class VisionSystem:
         
         self._emergency_triggered = True
         contact = self._cfg.emergency_contact.upper()
-        msg = f"EMERGENCY DETECTED: {reason}. CALLING {contact} NOW. PLEASE SEND HELP TO THIS LOCATION."
+        
+        loc_str = ""
+        if self._longitude is not None and self._latitude is not None:
+            loc_str = f" My coordinates are: {self._longitude}, {self._latitude}."
+
+        msg = f"EMERGENCY DETECTED: {reason}. CALLING {contact} NOW. PLEASE SEND HELP TO THIS LOCATION.{loc_str}"
         # Use the dedicated emergency callback (which repeats speech)
         self._on_emergency(msg)
         print(f"[vision] !!! EMERGENCY !!! {msg}")

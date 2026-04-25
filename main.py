@@ -1,20 +1,3 @@
-#!/usr/bin/env python3
-"""
-Assistive navigation prototype: webcam + YOLO warnings + mock directions.
-
-Combines:
-  - vision.py  : person / obstacle cues
-  - speech.py  : pyttsx3 with urgent vs normal priority
-  - navigation.py : scripted spoken directions (or real steps via routing.py)
-
-Optional maps: set OPENROUTESERVICE_API_KEY and pass --origin lon,lat (see routing.py).
-
-Run from this folder:
-  python main.py
-"""
-
-from __future__ import annotations
-
 import argparse
 import os
 import threading
@@ -50,17 +33,67 @@ def main() -> None:
         help="Minimum frequency (Hz) to trigger strobe warning (default: 3.0).",
     )
     parser.add_argument(
+        "--model",
+        type=str,
+        default="yolov8n.pt",
+        help="Ultralytics weights path or name (default: yolov8n.pt).",
+    )
+    parser.add_argument(
         "--emergency-contact",
         type=str,
         default="Emergency Services",
         help="Name of the contact to alert in an emergency.",
     )
+    parser.add_argument(
+        "--destination",
+        type=str,
+        default=None,
+        help="Target destination name (skips interactive prompt if provided).",
+    )
+    parser.add_argument(
+        "--origin",
+        type=str,
+        default=None,
+        help='Walking start as "longitude,latitude" (use with OPENROUTESERVICE_API_KEY for real directions).',
+    )
+    parser.add_argument(
+        "--nav-interval",
+        type=float,
+        default=5.0,
+        help="Seconds between spoken navigation prompts (default: 5).",
+    )
     args = parser.parse_args()
 
-    print("=== Seizure & Fall Detection System ===")
-    print("Loading speech engine (Emergency Only)...")
+    print("=== Assistive Navigation & Safety System ===")
+    print("Loading speech engine...")
     speech = SpeechController()
     speech.start()
+
+    if args.destination:
+        destination = args.destination.strip()
+    else:
+        destination = input("Enter destination (place name or address): ").strip()
+
+    if not destination:
+        destination = "the lobby"
+        print(f"[main] No destination entered; using default: {destination}")
+
+    nav_route: list[str] | None = None
+    repeat_nav = True
+    ors_key = (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip()
+    if args.origin:
+        if not ors_key:
+            print("[main] --origin set but OPENROUTESERVICE_API_KEY is unset; using mock navigation.")
+        else:
+            try:
+                # Helper to parse origin
+                parts = [p.strip() for p in args.origin.split(",")]
+                start = (float(parts[0]), float(parts[1]))
+                nav_route = build_maps_route(ors_key, start, destination)
+                repeat_nav = False
+                print(f"[main] OpenRouteService: {len(nav_route)} spoken steps loaded.")
+            except Exception as exc:
+                print(f"[main] Maps routing failed ({exc}); using mock navigation.")
 
     stop_event = threading.Event()
 
@@ -70,6 +103,7 @@ def main() -> None:
         print(f"[ALERT] {msg}")
 
     vcfg = VisionConfig(
+        model_path=args.model,
         strobe_freq=args.strobe_freq,
         emergency_contact=args.emergency_contact,
         # We can keep vision-based fall detection active as a supplement
@@ -81,11 +115,37 @@ def main() -> None:
         config=vcfg
     )
 
+    if args.origin:
+        try:
+            parts = [p.strip() for p in args.origin.split(",")]
+            vision.set_location(float(parts[0]), float(parts[1]))
+        except Exception:
+            pass
+
     # Start hardware sensor listeners if available
     vision._motion_fall_detector.start(lambda d: vision.handle_sensor_fall(f"Altitude drop of {d:.1f}m"))
     vision._smv_fall_detector.start(lambda s, x, y: vision.handle_sensor_fall(f"Impact force of {s:.1f} m/s^2"))
 
-    print("[main] System active. Monitoring for strobe lights and falls...")
+    def nav_speak(msg: str) -> None:
+        speech.speak_normal(msg)
+        print(f"[nav->speech] {msg}")
+
+    nav_thread = threading.Thread(
+        target=run_navigation_loop,
+        kwargs={
+            "destination": destination,
+            "speak": nav_speak,
+            "interval_seconds": args.nav_interval,
+            "stop_event": stop_event,
+            "route": nav_route,
+            "repeat_route": repeat_nav,
+        },
+        name="Navigation",
+        daemon=True,
+    )
+    nav_thread.start()
+
+    print("[main] System active. Monitoring for strobe lights, falls, and providing navigation...")
     try:
         vision.run_forever(camera_index=args.camera, stop_event=stop_event)
     except KeyboardInterrupt:
