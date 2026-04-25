@@ -396,6 +396,13 @@ Examples:
         action="store_true",
         help="Enable test-time augmentation"
     )
+    vision_group.add_argument(
+        "--camera-mount",
+        type=str,
+        default="hand",
+        choices=["head", "hand"],
+        help="Camera mount position: 'head' for glasses/head-mounted, 'hand' for phone (default: hand)."
+    )
     
     return parser
 
