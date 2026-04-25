@@ -212,6 +212,8 @@ def main() -> None:
         except Exception as exc:
             print(f"[main] Maps routing failed ({exc}); using mock navigation.")
     else:
+        if args.live_nav:
+            print("[main] WARNING: --live-nav requires --origin; falling back to mock navigation.")
         if google_key or ors_key:
             print("[main] Map API key detected; add --origin=lon,lat to enable turn-by-turn directions.")
 

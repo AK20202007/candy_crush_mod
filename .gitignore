@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# Ultralytics auto-generated config
+Ultralytics/
+
+# Model weights (auto-downloaded by Ultralytics)
+*.pt
+
+# Environment / secrets
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

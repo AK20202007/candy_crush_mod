@@ -24,14 +24,6 @@ class SpeechController:
     """
 
     def __init__(self) -> None:
-        self._engine = pyttsx3.init()
-        # Slightly faster speech keeps the demo snappy (platform-dependent).
-        try:
-            rate = self._engine.getProperty("rate")
-            self._engine.setProperty("rate", int(rate * 1.1))
-        except Exception:
-            pass
-
         self._normal: queue.Queue[str] = queue.Queue()
         self._urgent_pending = False
         self._urgent_message: Optional[str] = None
@@ -83,6 +75,13 @@ class SpeechController:
             return msg
 
     def _worker(self) -> None:
+        engine = pyttsx3.init()
+        try:
+            rate = engine.getProperty("rate")
+            engine.setProperty("rate", int(rate * 1.1))
+        except Exception:
+            pass
+
         while not self._stop.is_set():
             self._drain_normal_if_urgent()
             msg = self._pop_urgent()
@@ -95,11 +94,10 @@ class SpeechController:
                 continue
 
             try:
-                # Stop may help skip to the next phrase on some backends (best-effort).
-                self._engine.stop()
+                engine.stop()
             except Exception:
                 pass
 
-            self._engine.say(msg)
-            self._engine.runAndWait()
-            time.sleep(0.05)  # Tiny pause so logs and engine stay stable between lines.
+            engine.say(msg)
+            engine.runAndWait()
+            time.sleep(0.05)
