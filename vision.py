@@ -4,16 +4,22 @@ Webcam capture + YOLOv8 detection for assistive navigation prototype.
 Targets: person, chair, car, and door if the loaded model exposes that class
 name (standard COCO YOLO weights usually do not include "door"; we detect it
 when present).
+
+The repo https://github.com/jjking00/YOLO-OD is an MMYOLO/OpenMMLab fork
+(training stack: MMCV, MMDet, configs). It is not practical to embed here;
+instead we tighten Ultralytics inference (class filter, conf/iou/imgsz,
+optional TTA, FP16 on CUDA) and stabilize warnings across frames.
 """
 
 from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
+import torch
 from ultralytics import YOLO
 
 
@@ -24,7 +30,7 @@ OPTIONAL_CLASSES: Set[str] = {"door"}
 
 @dataclass
 class VisionConfig:
-    """Tunable thresholds for warnings."""
+    """Tunable thresholds for warnings and YOLO inference."""
 
     model_path: str = "yolov8n.pt"
     # Fraction of frame area: above this => "close" obstacle (chair/car/door).
@@ -33,6 +39,20 @@ class VisionConfig:
     person_center_radius: float = 0.18
     # Minimum seconds between repeating the same warning phrase.
     warning_cooldown_s: float = 2.5
+    # Require this many consecutive frames with the hazard before speaking (reduces flicker).
+    confirm_frames: int = 2
+    # Ultralytics predict: min confidence (higher = fewer false positives, may miss small objects).
+    conf: float = 0.35
+    # NMS IoU threshold.
+    iou: float = 0.5
+    # Square inference size (larger often helps small objects; slower).
+    imgsz: int = 640
+    # FP16 on CUDA only (Ultralytics); ignored on CPU/MPS if unsupported.
+    half: Optional[bool] = None
+    # Test-time augmentation (slower, can improve recall on hard frames).
+    augment: bool = False
+    # Cap detections per frame for speed on busy scenes.
+    max_det: int = 50
 
 
 class VisionSystem:
@@ -59,6 +79,19 @@ class VisionSystem:
                 self._active_classes.add(name)
 
         self._last_phrase_time: Dict[str, float] = {}
+        self._class_ids: List[int] = sorted(
+            self._name_to_id[n] for n in self._active_classes if n in self._name_to_id
+        )
+        self._consec_person: int = 0
+        self._consec_obstacle: int = 0
+
+        use_half = self._cfg.half if self._cfg.half is not None else bool(torch.cuda.is_available())
+        self._predict_half = bool(use_half and torch.cuda.is_available())
+        print(
+            f"[vision] Inference: imgsz={self._cfg.imgsz} conf={self._cfg.conf} iou={self._cfg.iou} "
+            f"classes={len(self._class_ids)} half={self._predict_half} augment={self._cfg.augment} "
+            f"confirm_frames={self._cfg.confirm_frames}"
+        )
 
     def active_class_labels(self) -> Set[str]:
         """Which COCO (or model) labels we actually track for this run."""
@@ -72,9 +105,11 @@ class VisionSystem:
         self._last_phrase_time[phrase] = now
         return True
 
-    def _maybe_warn(self, phrase: str) -> None:
+    def _maybe_warn(self, phrase: str) -> bool:
         if self._cooldown_ok(phrase):
             self._on_warning(phrase)
+            return True
+        return False
 
     def run_forever(self, camera_index: int = 0, stop_event=None) -> None:
         cap = cv2.VideoCapture(camera_index)
@@ -116,15 +151,34 @@ class VisionSystem:
             cv2.destroyAllWindows()
 
     def _process_frame(self, frame: np.ndarray, w: int, h: int) -> None:
-        results = self._model.predict(source=frame, verbose=False, stream=False)
+        cfg = self._cfg
+        n_confirm = max(1, cfg.confirm_frames)
+
+        results = self._model.predict(
+            source=frame,
+            verbose=False,
+            stream=False,
+            conf=cfg.conf,
+            iou=cfg.iou,
+            imgsz=cfg.imgsz,
+            half=self._predict_half,
+            augment=cfg.augment,
+            max_det=cfg.max_det,
+            classes=self._class_ids,
+        )
         if not results:
+            self._consec_person = 0
+            self._consec_obstacle = 0
             return
         r0 = results[0]
         if r0.boxes is None or len(r0.boxes) == 0:
+            self._consec_person = 0
+            self._consec_obstacle = 0
             return
 
         boxes = r0.boxes.xyxy.cpu().numpy()
         clss = r0.boxes.cls.cpu().numpy().astype(int)
+        confs = r0.boxes.conf.cpu().numpy() if r0.boxes.conf is not None else None
 
         frame_area = float(w * h)
         cx_img, cy_img = w / 2.0, h / 2.0
@@ -132,7 +186,7 @@ class VisionSystem:
         person_center_hit = False
         obstacle_close = False
 
-        for (x1, y1, x2, y2), cls_id in zip(boxes, clss):
+        for i, ((x1, y1, x2, y2), cls_id) in enumerate(zip(boxes, clss)):
             name = self._model.names[int(cls_id)].lower()
             if name not in self._active_classes:
                 continue
@@ -158,9 +212,12 @@ class VisionSystem:
             p1: Tuple[int, int] = (int(x1), int(y1))
             p2: Tuple[int, int] = (int(x2), int(y2))
             cv2.rectangle(frame, p1, p2, color, 2)
+            conf_s = ""
+            if confs is not None and i < len(confs):
+                conf_s = f" {float(confs[i]):.2f}"
             cv2.putText(
                 frame,
-                f"{name} {area_ratio:.2f}",
+                f"{name}{conf_s} {area_ratio:.2f}",
                 (int(x1), max(20, int(y1) - 6)),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.5,
@@ -170,6 +227,17 @@ class VisionSystem:
             )
 
         if person_center_hit:
-            self._maybe_warn("Watch out, person ahead")
+            self._consec_person += 1
+        else:
+            self._consec_person = 0
         if obstacle_close:
-            self._maybe_warn("Obstacle ahead")
+            self._consec_obstacle += 1
+        else:
+            self._consec_obstacle = 0
+
+        if self._consec_person >= n_confirm:
+            if self._maybe_warn("Watch out, person ahead"):
+                self._consec_person = 0
+        if self._consec_obstacle >= n_confirm:
+            if self._maybe_warn("Obstacle ahead"):
+                self._consec_obstacle = 0

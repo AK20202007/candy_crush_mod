@@ -49,6 +49,19 @@ python main.py --camera 0 --nav-interval 5
 - `--camera`: webcam index if you have multiple cameras.
 - `--nav-interval`: seconds between navigation phrases.
 
+### Detection quality (Ultralytics)
+
+The project [jjking00/YOLO-OD](https://github.com/jjking00/YOLO-OD) is an **MMYOLO**-style fork (OpenMMLab: MMCV, MMDetection, config-driven training). It is aimed at training and benchmarks, not a lightweight drop-in next to this demo’s `pip install ultralytics` stack. This repo instead tightens **Ultralytics** inference and warning logic:
+
+- **Class filter**: only person / chair / car / (door) run through NMS, which cuts stray classes and work.
+- **Defaults**: slightly higher `--conf` (0.35) and **2-frame confirmation** before speaking to reduce flicker.
+- **Optional**: larger `--imgsz`, heavier `--model` (e.g. `yolov8s.pt`), `--augment` (TTA), FP16 on CUDA unless `--no-half`.
+
+```bash
+python main.py --model yolov8s.pt --imgsz 960 --confirm-frames 3
+python main.py --conf 0.25 --confirm-frames 1   # more sensitive, chattier
+```
+
 **Controls**
 
 - **Preview window**: press **`q`** to quit.
