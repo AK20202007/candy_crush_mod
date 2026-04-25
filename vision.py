@@ -19,6 +19,13 @@ import numpy as np
 import torch
 from ultralytics import YOLO
 
+try:
+    from CoreMotion import CMAltimeter, CMMotionManager
+    from Foundation import NSOperationQueue
+    HAS_CORE_MOTION = True
+except ImportError:
+    HAS_CORE_MOTION = False
+
 from agentic_layer import (
     AgentDecision,
     AgenticNavigationRouter,
@@ -140,6 +147,118 @@ class VisionConfig:
     enable_surface_heuristic: bool = True
 
 
+class MotionFallDetector:
+    """Uses Apple's CoreMotion (CMAltimeter) to detect rapid altitude drops."""
+
+    def __init__(self, drop_threshold: float = -1.37): # 4.5 feet is roughly 1.37 meters
+        self._altimeter = None
+        self._drop_threshold = drop_threshold
+        self._is_available = False
+        self._fall_detected = False
+        self._history = deque() # tuples of (timestamp, altitude)
+        self._fall_candidate_time = None
+
+        if HAS_CORE_MOTION:
+            try:
+                self._altimeter = CMAltimeter.alloc().init()
+                self._is_available = CMAltimeter.isRelativeAltitudeAvailable()
+            except Exception as e:
+                print(f"[motion] Error initializing CMAltimeter: {e}")
+
+    def start(self, callback: Callable[[float], None]):
+        """Starts listening for altitude changes."""
+        if not self._is_available or self._altimeter is None:
+            print("[motion] Relative altitude not available on this device.")
+            return
+
+        queue = NSOperationQueue.mainQueue()
+
+        def _handler(data, error):
+            if error:
+                return
+            
+            now = time.time()
+            alt = data.relativeAltitude().floatValue()
+            
+            self._history.append((now, alt))
+            # Keep a 5-second rolling window to find max altitude before the fall
+            while self._history and now - self._history[0][0] > 5.0:
+                self._history.popleft()
+                
+            max_recent_alt = max(a for _, a in self._history)
+            diff = alt - max_recent_alt # typically negative during a drop
+            
+            if diff <= self._drop_threshold:
+                if self._fall_candidate_time is None:
+                    self._fall_candidate_time = now
+                elif now - self._fall_candidate_time >= 20.0:
+                    if not self._fall_detected:
+                        self._fall_detected = True
+                        callback(diff)
+            else:
+                self._fall_candidate_time = None
+
+        self._altimeter.startRelativeAltitudeUpdatesToQueue_withHandler_(queue, _handler)
+
+    def is_fall_detected(self) -> bool:
+        return self._fall_detected
+
+    def reset(self):
+        self._fall_detected = False
+        self._fall_candidate_time = None
+
+
+class SignalMagnitudeFallDetector:
+    """
+    Implements fall detection logic from aadithyanr/Fall-Detection.
+    Calculates Signal Magnitude Vector (SMV) and checks orientation.
+    """
+
+    def __init__(self, smv_threshold: float = 25.0, angle_threshold: float = 30.0):
+        self._smv_threshold = smv_threshold
+        self._angle_threshold = angle_threshold
+        self._manager = None
+        self._is_available = False
+        self._fall_detected = False
+
+        if HAS_CORE_MOTION:
+            try:
+                self._manager = CMMotionManager.alloc().init()
+                self._is_available = self._manager.isAccelerometerAvailable()
+            except Exception as e:
+                print(f"[sensor] Error initializing CMMotionManager: {e}")
+
+    def start(self, callback: Callable[[float, float, float], None]):
+        if not self._is_available or self._manager is None:
+            print("[sensor] Accelerometer not available on this device.")
+            return
+
+        queue = NSOperationQueue.mainQueue()
+
+        def _handler(data, error):
+            if error:
+                return
+            accel = data.accelerometerData().acceleration()
+            # Acceleration is in Gs on iOS/macOS, convert to m/s^2 if needed
+            # The Java code uses m/s^2 (G=9.8), so we multiply by 9.8
+            ax, ay, az = accel.x * 9.8, accel.y * 9.8, accel.z * 9.8
+            smv = (ax**2 + ay**2 + az**2)**0.5
+
+            if smv > self._smv_threshold:
+                # In a real app we'd check deviceMotion for orientation (fused pitch/roll)
+                # For this prototype, we'll trigger if SMV is high.
+                self._fall_detected = True
+                callback(smv, ax, ay)
+
+        self._manager.startAccelerometerUpdatesToQueue_withHandler_(queue, _handler)
+
+    def is_fall_detected(self) -> bool:
+        return self._fall_detected
+
+    def reset(self):
+        self._fall_detected = False
+
+
 class VisionSystem:
     """
     Opens the webcam, runs YOLO each frame, and emits one agent decision.
@@ -185,6 +304,9 @@ class VisionSystem:
 
         self._consec_warning_hits: Dict[str, int] = {}
         self._last_spoken: Optional[str] = None
+        
+        self._motion_fall_detector = MotionFallDetector()
+        self._smv_fall_detector = SignalMagnitudeFallDetector()
 
         use_half = self._cfg.half if self._cfg.half is not None else bool(torch.cuda.is_available())
         self._predict_half = bool(use_half and torch.cuda.is_available())

@@ -1,0 +1,192 @@
+[
+  {
+    "name": "critical hazard beats route guidance",
+    "steps": [
+      {
+        "context": {
+          "timestamp_ms": 1714060200000,
+          "frame_id": "hazard-route",
+          "warnings": [
+            {
+              "kind": "stairs",
+              "message": "stairs ahead",
+              "severity": "critical",
+              "confidence": 0.9,
+              "distance_m": 0.9,
+              "direction": "center"
+            }
+          ],
+          "motion": {"is_moving": true, "speed_mps": 0.8},
+          "route": {"active": true, "destination": "lobby", "next_instruction": "Walk straight"},
+          "scene": {"location_type": "hallway", "visual_confidence": 0.9}
+        },
+        "expect": {
+          "action": "warn",
+          "priority": 100,
+          "haptic": "stop",
+          "message_contains": ["Stop.", "stairs ahead", "12 o'clock"]
+        }
+      }
+    ]
+  },
+  {
+    "name": "target finding chooses closer usable chair",
+    "steps": [
+      {
+        "context": {
+          "timestamp_ms": 1714060200100,
+          "frame_id": "target-chair",
+          "detections": [
+            {"label": "chair", "confidence": 0.7, "distance_m": 0.9, "direction": "left"},
+            {"label": "chair", "confidence": 0.93, "distance_m": 2.0, "direction": "right"},
+            {"label": "door", "confidence": 0.99, "distance_m": 1.0, "direction": "center"}
+          ],
+          "motion": {"is_moving": false},
+          "scene": {"location_type": "room", "visual_confidence": 0.9},
+          "user": {"query": "where is the chair"}
+        },
+        "expect": {
+          "action": "guide",
+          "priority": 70,
+          "haptic": "left",
+          "message_contains": ["chair found", "9 o'clock", "less than 3 feet"]
+        }
+      }
+    ]
+  },
+  {
+    "name": "street crossing remains descriptive only",
+    "steps": [
+      {
+        "context": {
+          "timestamp_ms": 1714060200200,
+          "frame_id": "crossing",
+          "motion": {"is_moving": true, "speed_mps": 0.7},
+          "route": {"active": true, "destination": "market", "next_instruction": "Continue north"},
+          "scene": {"location_type": "street_crossing", "visual_confidence": 0.95}
+        },
+        "expect": {
+          "action": "warn",
+          "priority": 90,
+          "requires_human": true,
+          "message_contains": ["Intersection area detected", "do not rely on me"],
+          "message_not_contains": ["safe to cross now"]
+        }
+      }
+    ]
+  },
+  {
+    "name": "expired external warning yields to route",
+    "steps": [
+      {
+        "context": {
+          "timestamp_ms": 1714060205000,
+          "frame_id": "expired-warning",
+          "warnings": [
+            {
+              "kind": "stairs",
+              "message": "stairs ahead",
+              "severity": "critical",
+              "confidence": 0.9,
+              "distance_m": 0.8,
+              "direction": "center",
+              "observed_at_ms": 1714060200000,
+              "expires_ms": 1000
+            }
+          ],
+          "motion": {"is_moving": true},
+          "route": {"active": true, "destination": "lobby", "next_instruction": "Turn right"},
+          "scene": {"location_type": "hallway", "visual_confidence": 0.9}
+        },
+        "expect": {
+          "action": "guide",
+          "priority": 60,
+          "message_contains": ["Turn right"]
+        }
+      }
+    ]
+  },
+  {
+    "name": "urgent repeat is briefly suppressed",
+    "router": {"min_urgent_repeat_interval_ms": 1000},
+    "steps": [
+      {
+        "context": {
+          "timestamp_ms": 1714060210000,
+          "frame_id": "urgent-repeat-1",
+          "warnings": [
+            {
+              "kind": "curb",
+              "message": "curb ahead",
+              "severity": "critical",
+              "confidence": 0.9,
+              "distance_m": 0.7,
+              "direction": "center"
+            }
+          ],
+          "motion": {"is_moving": true}
+        },
+        "expect": {"action": "warn", "priority": 100, "should_speak": true}
+      },
+      {
+        "context": {
+          "timestamp_ms": 1714060210500,
+          "frame_id": "urgent-repeat-2",
+          "warnings": [
+            {
+              "kind": "curb",
+              "message": "curb ahead",
+              "severity": "critical",
+              "confidence": 0.9,
+              "distance_m": 0.7,
+              "direction": "center"
+            }
+          ],
+          "motion": {"is_moving": true}
+        },
+        "expect": {
+          "action": "silent",
+          "should_speak": false,
+          "debug_reason": "repeat suppressed"
+        }
+      },
+      {
+        "context": {
+          "timestamp_ms": 1714060211100,
+          "frame_id": "urgent-repeat-3",
+          "warnings": [
+            {
+              "kind": "curb",
+              "message": "curb ahead",
+              "severity": "critical",
+              "confidence": 0.9,
+              "distance_m": 0.7,
+              "direction": "center"
+            }
+          ],
+          "motion": {"is_moving": true}
+        },
+        "expect": {"action": "warn", "priority": 100, "should_speak": true}
+      }
+    ]
+  },
+  {
+    "name": "low confidence while moving asks user to slow down",
+    "steps": [
+      {
+        "context": {
+          "timestamp_ms": 1714060220000,
+          "frame_id": "low-confidence",
+          "motion": {"is_moving": true, "speed_mps": 0.8},
+          "scene": {"location_type": "hallway", "visual_confidence": 0.2}
+        },
+        "expect": {
+          "action": "ask",
+          "priority": 75,
+          "haptic": "caution",
+          "message_contains": ["camera confidence is low", "Slow down"]
+        }
+      }
+    ]
+  }
+]

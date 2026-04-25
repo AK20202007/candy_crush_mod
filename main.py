@@ -322,6 +322,10 @@ def main() -> None:
         on_frame_decision=telemetry_store.record_decision if telemetry_store.enabled else None,
     )
 
+    # Start hardware sensor listeners if available
+    vision._motion_fall_detector.start(lambda d: vision.handle_sensor_fall(f"DRAMATIC elevation change of {d:.1f}m", priority=99))
+    vision._smv_fall_detector.start(lambda s, x, y: vision.handle_sensor_fall(f"Impact force of {s:.1f} m/s^2", priority=10))
+
     print(f"[main] Model will track labels: {sorted(vision.active_class_labels()) or 'all'}")
     print("[main] Agentic router is active. Safety warnings override route guidance.")
     if args.target or args.query:
