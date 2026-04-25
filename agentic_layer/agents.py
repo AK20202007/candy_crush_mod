@@ -95,23 +95,59 @@ SIDEWALK_QUERY_TERMS = {
 
 def _distance_phrase(distance_m: Optional[float]) -> str:
     if distance_m is None:
-        return "nearby"
-    if distance_m < 0.35:
-        return "within arm's reach"
-    if distance_m < 1.0:
+        return "unknown distance"
+    if distance_m < 0.5:
+        return "less than 2 feet away"
+    elif distance_m < 1.0:
         return "less than 3 feet away"
-    feet = round(distance_m * 3.28084)
-    return f"about {feet} feet away"
+    elif distance_m < 1.5:
+        return "less than 5 feet away"
+    elif distance_m < 2.5:
+        return "about 6 feet away"
+    elif distance_m < 4.0:
+        return "about 10 feet away"
+    elif distance_m < 6.0:
+        return "about 15 feet away"
+    elif distance_m < 10.0:
+        return "about 20 feet away"
+    else:
+        return "more than 30 feet away"
+
+
+def _speed_phrase(speed_mps: float) -> str:
+    """Convert speed in m/s to human-readable phrase."""
+    if speed_mps < 1.0:
+        return "walking speed"
+    elif speed_mps < 3.0:
+        return "slow speed"
+    elif speed_mps < 8.0:
+        return "moderate speed"
+    elif speed_mps < 15.0:
+        return "fast speed"
+    else:
+        return "very high speed"
 
 
 def _direction_phrase(direction: Direction) -> str:
     return {
-        Direction.LEFT: "at 9 o'clock",
-        Direction.SLIGHT_LEFT: "at 10 o'clock",
-        Direction.CENTER: "at 12 o'clock",
-        Direction.SLIGHT_RIGHT: "at 2 o'clock",
-        Direction.RIGHT: "at 3 o'clock",
+        Direction.LEFT: "left",
+        Direction.SLIGHT_LEFT: "left",
+        Direction.CENTER: "ahead",
+        Direction.SLIGHT_RIGHT: "right",
+        Direction.RIGHT: "right",
         Direction.UNKNOWN: "ahead",
+    }[direction]
+
+
+def _avoidance_phrase(direction: Direction) -> str:
+    """Return a phrase telling the user which way to move to avoid the obstacle."""
+    return {
+        Direction.LEFT: "Move right.",
+        Direction.SLIGHT_LEFT: "Move right.",
+        Direction.CENTER: "Move left or right.",
+        Direction.SLIGHT_RIGHT: "Move left.",
+        Direction.RIGHT: "Move left.",
+        Direction.UNKNOWN: "Move left or right.",
     }[direction]
 
 
@@ -155,10 +191,11 @@ class SafetyAgent(BaseAgent):
             )[0]
             if self.policy.warning_confidence_ok(high.severity, high.confidence) and (ctx.motion.is_moving or high.is_immediate()):
                 prefix = "Stop." if high.is_immediate() or high.severity == "critical" else "Caution."
+                avoidance = _avoidance_phrase(high.direction) if high.direction else ""
                 return AgentDecision(
                     action=AgentAction.WARN,
                     priority=100 if high.is_immediate() else 85,
-                    message=f"{prefix} {_warning_message(high.message or high.kind, high.direction, high.distance_m)}",
+                    message=f"{prefix} {_warning_message(high.message or high.kind, high.direction, high.distance_m)} {avoidance}".strip(),
                     haptic=HapticPattern.STOP if high.is_immediate() else _haptic_for_direction(high.direction),
                     agents_consulted=[self.name],
                     debug={"warning": high.model_dump(), "reason": "existing warning prioritized"},
@@ -191,12 +228,15 @@ class SafetyAgent(BaseAgent):
                 or _partial_edge_requires_stop(det)
             )
             subject = f"partially visible {det.label}" if partial_edge else det.label
+            avoidance = _avoidance_phrase(det.direction)
+            # Omit distance for immediate obstacles (≤1.0m) for brevity
+            distance_str = "" if (det.distance_m is not None and det.distance_m <= 1.0) else f", {_detection_distance_phrase(det)}"
             return AgentDecision(
                 action=AgentAction.WARN,
-                priority=100 if is_stop else 82 if partial_edge else 80,
+                priority=95 if is_stop else 82 if partial_edge else 80,
                 message=(
                     f"{'Stop' if is_stop else 'Caution'}: {subject} "
-                    f"{_direction_phrase(det.direction)}, {_detection_distance_phrase(det)}."
+                    f"{_direction_phrase(det.direction)}{distance_str}. {avoidance}"
                 ),
                 haptic=_haptic_for_direction(det.direction, urgent=is_stop),
                 agents_consulted=[self.name, "partial_edge" if partial_edge else "object_distance"],
@@ -244,12 +284,14 @@ class SafetyAgent(BaseAgent):
                 det = sorted(immediate, key=lambda d: d.distance_m if d.distance_m is not None else 99)[0]
                 partial_edge = _is_partial_edge_detection(det)
                 subject = f"partially visible {det.label}" if partial_edge else det.label
+                avoidance = _avoidance_phrase(det.direction)
+                # Omit distance for immediate obstacles (≤1.0m) for brevity
+                distance_str = "" if (det.distance_m is not None and det.distance_m <= 1.0) else f", {_detection_distance_phrase(det)}"
                 return AgentDecision(
                     action=AgentAction.WARN,
-                    priority=100,  # Always stop for immediate unknown obstacles
+                    priority=95,  # Always stop for immediate unknown obstacles
                     message=(
-                        f"Stop: {subject} {_direction_phrase(det.direction)}, "
-                        f"{_detection_distance_phrase(det)}."
+                        f"Stop: {subject} {_direction_phrase(det.direction)}{distance_str}. {avoidance}"
                     ),
                     haptic=_haptic_for_direction(det.direction, urgent=True),
                     agents_consulted=[self.name, "partial_edge" if partial_edge else "universal_proximity"],
@@ -265,10 +307,12 @@ class SafetyAgent(BaseAgent):
                 if surface.kind == SurfaceKind.OBSTACLE_EDGE:
                     # Only trigger if confident and close enough
                     if surface.confidence >= 0.5 and surface.distance_m is not None and surface.distance_m <= 1.2:
-                        priority = 100 if surface.distance_m <= 0.8 else 85
+                        priority = 95 if surface.distance_m <= 0.8 else 85
+                        avoidance = _avoidance_phrase(surface.direction)
+                        # Omit distance for immediate obstacles (≤1.0m) for brevity
+                        distance_str = "" if surface.distance_m <= 1.0 else f" {_distance_phrase(surface.distance_m)}"
                         message = (
-                            f"Stop: partially visible obstacle {_direction_phrase(surface.direction)} "
-                            f"{_distance_phrase(surface.distance_m)}."
+                            f"Stop: partially visible obstacle {_direction_phrase(surface.direction)}{distance_str}. {avoidance}"
                         )
                         return AgentDecision(
                             action=AgentAction.WARN,
@@ -347,7 +391,7 @@ class SidewalkAgent(BaseAgent):
         if road and _surface_ahead(road) and road.confidence >= 0.50 and road.near_field_ratio >= 0.35 and ctx.motion.is_moving:
             return AgentDecision(
                 action=AgentAction.WARN,
-                priority=100,  # Obstacles/Road hazards have #1 priority
+                priority=96,
                 message=(
                     f"Stop. Road surface appears {_direction_phrase(road.direction)} in the near field. "
                     "Confirm the sidewalk edge before moving."
@@ -449,6 +493,83 @@ class TargetFindingAgent(BaseAgent):
         )
 
 
+class TrafficAgent(BaseAgent):
+    """Detects moving vehicles and provides warnings based on speed and direction.
+    
+    Prioritizes vehicles moving toward the user or at high speeds.
+    """
+    name = "traffic"
+
+    def handle(self, ctx: FrameContext) -> Optional[AgentDecision]:
+        if ctx.scene.location_type not in {"sidewalk", "street", "street_crossing", "outdoor", "unknown"}:
+            return None
+
+        # Check for moving vehicles
+        moving_vehicles = []
+        for det in ctx.detections:
+            is_moving = det.attributes.get("is_moving", False)
+            if not is_moving:
+                continue
+            
+            speed_mps = det.attributes.get("speed_mps", 0.0)
+            movement_direction = det.attributes.get("movement_direction", "unknown")
+            
+            # Filter for vehicle labels
+            if det.label.lower() not in {"car", "bus", "truck", "motorcycle", "bicycle"}:
+                continue
+            
+            # Prioritize vehicles moving toward user (down in frame = getting closer)
+            if movement_direction == "down" and speed_mps > 1.0:
+                moving_vehicles.append((det, speed_mps, movement_direction))
+            # Also warn about fast-moving vehicles regardless of direction
+            elif speed_mps > 5.0:  # > 18 km/h
+                moving_vehicles.append((det, speed_mps, movement_direction))
+
+        if not moving_vehicles:
+            return None
+
+        # Sort by speed (fastest first)
+        moving_vehicles.sort(key=lambda x: x[1], reverse=True)
+        det, speed_mps, movement_direction = moving_vehicles[0]
+
+        # Determine urgency based on speed and direction
+        is_approaching = movement_direction == "down"
+        is_fast = speed_mps > 5.0
+        is_close = det.distance_m is not None and det.distance_m < 5.0
+
+        avoidance = _avoidance_phrase(det.direction)
+        if is_approaching and (is_fast or is_close):
+            priority = 100  # Critical
+            message = f"Stop! {det.label} approaching. {avoidance}"
+            haptic = HapticPattern.STOP
+        elif is_approaching:
+            priority = 95
+            message = f"Caution: {det.label} moving toward you. {avoidance}"
+            haptic = HapticPattern.STOP
+        elif is_fast:
+            priority = 90
+            message = f"Fast {det.label} {_direction_phrase(det.direction)}. {avoidance}"
+            haptic = HapticPattern.CAUTION
+        else:
+            priority = 85
+            message = f"{det.label} {_direction_phrase(det.direction)}. {avoidance}"
+            haptic = HapticPattern.CAUTION
+
+        return AgentDecision(
+            action=AgentAction.WARN,
+            priority=priority,
+            message=message,
+            haptic=haptic,
+            agents_consulted=[self.name],
+            debug={
+                "detection": det.model_dump(),
+                "speed_mps": speed_mps,
+                "movement_direction": movement_direction,
+                "reason": "moving-vehicle-warning",
+            },
+        )
+
+
 class CrossingSignalAgent(BaseAgent):
     name = "crossing_signal"
 
@@ -491,13 +612,21 @@ class CrossingSignalAgent(BaseAgent):
 class WayfindingAgent(BaseAgent):
     name = "wayfinding"
 
+    # Navigation instructions must periodically break through obstacle/surface
+    # agents so the user hears where to go. Every N frames we boost priority.
+    _frame_counter: int = 0
+    _NAV_BOOST_EVERY: int = 30  # Boost every ~30 frames (~1-2 seconds at typical FPS)
+
     def handle(self, ctx: FrameContext) -> Optional[AgentDecision]:
         if not ctx.route.active:
             return None
+        
+        WayfindingAgent._frame_counter += 1
+        
         if ctx.route.off_route:
             return AgentDecision(
                 action=AgentAction.ASK,
-                priority=65,
+                priority=75,
                 message="You may be off route. Stop and slowly scan so I can re-orient you.",
                 haptic=HapticPattern.CAUTION,
                 agents_consulted=[self.name],
@@ -507,13 +636,19 @@ class WayfindingAgent(BaseAgent):
             distance = ""
             if ctx.route.next_turn_distance_m is not None:
                 distance = f" in about {round(ctx.route.next_turn_distance_m * 3.28084)} feet"
+            
+            # Periodically boost priority so navigation breaks through
+            # surface/obstacle agents. Safety (>=90) still overrides.
+            is_boost_frame = (WayfindingAgent._frame_counter % self._NAV_BOOST_EVERY == 0)
+            priority = 78 if is_boost_frame else 60
+            
             return AgentDecision(
                 action=AgentAction.GUIDE,
-                priority=60,
+                priority=priority,
                 message=f"{ctx.route.next_instruction}{distance}.",
                 haptic=HapticPattern.NONE,
                 agents_consulted=[self.name],
-                debug={"route": ctx.route.model_dump()},
+                debug={"route": ctx.route.model_dump(), "boosted": is_boost_frame},
             )
         return None
 
