@@ -24,6 +24,59 @@ _DEFAULT_STEPS = [
     "You are approaching your destination area",
 ]
 
+# Destination-aware mock steps for common location types
+_BUILDING_KEYWORDS = {"hall", "building", "center", "library", "gym", "office", "lab", "store", "shop", "restaurant", "cafe"}
+_ROOM_KEYWORDS = {"room", "suite", "unit", "apartment", "floor"}
+
+
+def _destination_aware_steps(destination: str) -> List[str]:
+    """Generate context-aware mock steps based on the destination name."""
+    dest_lower = destination.lower()
+    steps = []
+    
+    # Always start with the destination context
+    steps.append(f"Head toward {destination}.")
+    
+    # Check if destination sounds like a building
+    is_building = any(kw in dest_lower for kw in _BUILDING_KEYWORDS)
+    is_room = any(kw in dest_lower for kw in _ROOM_KEYWORDS)
+    is_outdoor = any(kw in dest_lower for kw in {"park", "field", "lot", "street", "avenue", "road", "plaza"})
+    
+    if is_building:
+        steps.extend([
+            "Continue walking straight ahead.",
+            f"Look for signs pointing to {destination}.",
+            "Keep walking, the building should be coming up.",
+            f"You are getting closer to {destination}.",
+            f"{destination} should be nearby. Look for the entrance.",
+        ])
+    elif is_room:
+        steps.extend([
+            "Continue down the hallway.",
+            f"Look for signs or room numbers for {destination}.",
+            "Keep walking, check the doors on your left and right.",
+            f"You are getting closer to {destination}.",
+            f"{destination} should be nearby. Check the next few doors.",
+        ])
+    elif is_outdoor:
+        steps.extend([
+            "Continue walking along the sidewalk.",
+            f"Keep heading toward {destination}.",
+            "Watch for crossings and intersections ahead.",
+            f"You are getting closer to {destination}.",
+            f"{destination} should be in this area.",
+        ])
+    else:
+        steps.extend([
+            "Continue walking straight ahead.",
+            f"Keep heading toward {destination}.",
+            "Stay on the current path.",
+            f"You are getting closer to {destination}.",
+            f"{destination} should be nearby.",
+        ])
+    
+    return steps
+
 
 @dataclass
 class RouteStep:
@@ -38,11 +91,13 @@ def build_route(destination: str) -> List[str]:
     """
     Build a spoken route for the given destination label.
 
-    The destination text is echoed once for context, then mock steps loop.
+    The destination text is echoed once for context, then destination-aware
+    mock steps loop to keep reminding the user where they are going.
     """
     dest = destination.strip() or "your destination"
     intro = f"Starting navigation to {dest}."
-    return [intro, *_DEFAULT_STEPS]
+    steps = _destination_aware_steps(dest)
+    return [intro, *steps]
 
 
 def _wait_interval(stop_event, interval_seconds: float) -> bool:
@@ -62,19 +117,43 @@ def run_navigation_loop(
     stop_event=None,
     route: Optional[List[str]] = None,
     repeat_route: bool = True,
+    startup_delay_s: float = 25.0,
+    speak_urgent: Optional[Callable[[str], None]] = None,
 ) -> None:
     """
     Speak one direction every ``interval_seconds`` until ``stop_event`` is set.
 
     ``speak`` should enqueue low-priority speech (e.g. ``SpeechController.speak_normal``).
+    ``speak_urgent`` is used for the startup confirmation (spoken immediately).
 
     If ``route`` is provided (e.g. from a maps API), those strings are spoken instead of
     ``build_route(destination)``. When ``repeat_route`` is False, the list is spoken once
     then the thread idles (suitable for real turn-by-turn lists).
+    
+    ``startup_delay_s`` adds a delay before navigation starts so the system
+    can confirm the destination and let the user orient themselves first.
     """
+    dest = destination.strip() or "your destination"
+    _speak_now = speak_urgent or speak
+
+    # Phase 1: Announce destination and let obstacle detection settle
+    _speak_now(f"Destination set to {dest}. Scanning your surroundings for 25 seconds.")
+    print(f"[nav] Waiting {startup_delay_s}s before starting navigation prompts...")
+    if _wait_interval(stop_event, startup_delay_s):
+        return
+
+    # Phase 2: Confirm and begin navigation
+    _speak_now(f"Starting navigation to {dest}. I will guide you.")
+    if _wait_interval(stop_event, 3.0):
+        return
+
     steps = list(route) if route is not None else build_route(destination)
     if not steps:
         steps = build_route(destination)
+
+    # Skip the intro step (we already announced it)
+    if steps and steps[0].lower().startswith("starting navigation"):
+        steps = steps[1:]
 
     if repeat_route:
         cycle = itertools.cycle(steps)
