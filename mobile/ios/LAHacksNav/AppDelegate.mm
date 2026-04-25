@@ -2,12 +2,18 @@
 
 #import <React/RCTBundleURLProvider.h>
 #import <React/RCTLinkingManager.h>
+#import <ReactAppDependencyProvider/RCTAppDependencyProvider.h>
 
 @implementation AppDelegate
 
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
 {
   self.moduleName = @"main";
+  self.dependencyProvider = [RCTAppDependencyProvider new];
+#if DEBUG
+  // Physical devices cannot resolve localhost to the Mac running Metro.
+  [[RCTBundleURLProvider sharedSettings] setJsLocation:@"172.23.164.121"];
+#endif
 
   // You can add your custom initial props in the dictionary below.
   // They will be passed down to the ViewController used by React Native.
