@@ -194,42 +194,81 @@ def get_text_confirmation() -> bool:
 
 def get_voice_confirmation(timeout: float = 5.0) -> bool:
     """
-    Listen for a spoken 'yes' or 'no' via the microphone.
+    Listen for a spoken 'yes' or 'no' via the microphone using ElevenLabs STT.
     Falls back to text input if voice recognition is unavailable.
     """
+    ELEVENLABS_API_KEY = "sk_b7ad54c02663e087df7e214908660e306cc0f1604ccc750c"
+    
     try:
-        import speech_recognition as sr
+        import sounddevice as sd
+        import numpy as np
+        import wave
+        import tempfile
     except ImportError:
-        print("[system] Speech recognition not available, using text input")
+        print("[system] Audio recording not available, using text input")
         return get_text_confirmation()
-
-    recognizer = sr.Recognizer()
-    recognizer.energy_threshold = 300
-    recognizer.dynamic_energy_threshold = True
 
     try:
-        with sr.Microphone() as source:
-            print("\n[system] Say 'yes' to confirm or 'no' to change destination...")
-            recognizer.adjust_for_ambient_noise(source, duration=0.5)
-            audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=3)
-
-        # Use Google's free speech recognition
-        text = recognizer.recognize_google(audio).strip().lower()
-        print(f"[system] Heard: '{text}'")
-
-        yes_words = {"yes", "yeah", "yep", "correct", "confirm", "ok", "okay", "sure", "right", "affirmative"}
-        no_words = {"no", "nope", "nah", "wrong", "incorrect", "change", "cancel"}
-
-        for word in yes_words:
-            if word in text:
-                return True
-        for word in no_words:
-            if word in text:
-                return False
-
-        # Couldn't determine — ask again via text
-        print(f"[system] Didn't catch that. Falling back to text input.")
-        return get_text_confirmation()
+        print("\n[system] Say 'yes' to confirm or 'no' to change destination...")
+        
+        # Record audio from microphone
+        samplerate = 16000
+        recording = sd.rec(
+            int(samplerate * timeout),
+            samplerate=samplerate,
+            channels=1,
+            dtype=np.int16
+        )
+        sd.wait()
+        
+        # Save to temp wav file
+        temp_path = tempfile.mktemp(suffix=".wav")
+        with wave.open(temp_path, 'wb') as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(samplerate)
+            wav_file.writeframes(recording.tobytes())
+        
+        # Send to ElevenLabs STT
+        import requests
+        with open(temp_path, 'rb') as f:
+            response = requests.post(
+                "https://api.elevenlabs.io/v1/speech-to-text",
+                headers={"xi-api-key": ELEVENLABS_API_KEY},
+                data={"model_id": "scribe_v1"},
+                files={"file": f},
+                timeout=15
+            )
+        
+        # Clean up temp file
+        try:
+            os.remove(temp_path)
+        except OSError:
+            pass
+        
+        if response.status_code == 200:
+            text = response.json().get("text", "").strip().lower()
+            print(f"[system] Heard: '{text}'")
+            
+            if not text:
+                print("[system] No speech detected. Falling back to text input.")
+                return get_text_confirmation()
+            
+            yes_words = {"yes", "yeah", "yep", "correct", "confirm", "ok", "okay", "sure", "right", "affirmative"}
+            no_words = {"no", "nope", "nah", "wrong", "incorrect", "change", "cancel"}
+            
+            for word in yes_words:
+                if word in text:
+                    return True
+            for word in no_words:
+                if word in text:
+                    return False
+            
+            print(f"[system] Didn't understand '{text}'. Falling back to text input.")
+            return get_text_confirmation()
+        else:
+            print(f"[system] ElevenLabs STT error: {response.status_code}")
+            return get_text_confirmation()
 
     except Exception as e:
         print(f"[system] Voice recognition error: {e}")
