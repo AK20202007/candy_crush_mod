@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Iterable, List, Optional
 
-from .models import AgentAction, AgentDecision, Detection, Direction, FrameContext, HapticPattern, SurfaceKind, SurfaceObservation
+from .models import AgentAction, AgentDecision, Detection, Direction, FrameContext, HapticPattern, INDOOR_LOCATION_TYPES, OUTDOOR_LOCATION_TYPES, SurfaceKind, SurfaceObservation
 from .policy import SafetyPolicy
 
 HAZARD_LABELS = {
@@ -139,28 +139,46 @@ def _direction_phrase(direction: Direction) -> str:
     }[direction]
 
 
-def _avoidance_phrase(direction: Direction, distance_m: Optional[float] = None) -> str:
-    """Return a phrase telling the user which way to move to avoid the obstacle."""
-    base_phrase = {
-        Direction.LEFT: "Move right",
-        Direction.SLIGHT_LEFT: "Move right",
-        Direction.CENTER: "Move left or right",
-        Direction.SLIGHT_RIGHT: "Move left",
-        Direction.RIGHT: "Move left",
-        Direction.UNKNOWN: "Move left or right",
+def _avoidance_phrase(direction: Direction, distance_m: Optional[float] = None, label: Optional[str] = None) -> str:
+    """Return a concrete phrase telling the user how to avoid the obstacle.
+
+    Uses body-oriented language (extend hand, trail wall, step around) and
+    includes approximate step counts so the user can judge how far to move.
+    """
+    avoid_dir = {
+        Direction.LEFT: "right",
+        Direction.SLIGHT_LEFT: "right",
+        Direction.CENTER: "right",
+        Direction.SLIGHT_RIGHT: "left",
+        Direction.RIGHT: "left",
+        Direction.UNKNOWN: "right",
     }[direction]
-    
+
+    hand = "left" if avoid_dir == "right" else "right"
+
+    if distance_m is not None and distance_m <= 0.6:
+        return f"Stop. Extend your {hand} hand to feel the obstacle, then sidestep {avoid_dir}."
+    if distance_m is not None and distance_m <= 1.0:
+        return f"Slow down. Step one pace to the {avoid_dir} to clear it."
+
+    steps = _estimated_clearance_steps(distance_m, label)
+    if steps and steps > 1:
+        return f"Move {steps} steps to the {avoid_dir} to go around."
+    return f"Step to the {avoid_dir} to go around."
+
+
+def _estimated_clearance_steps(distance_m: Optional[float], label: Optional[str] = None) -> Optional[int]:
+    """Estimate how many steps the user needs to clear the obstacle."""
+    if label:
+        width_hint = {
+            "dining table": 3, "couch": 3, "bench": 2, "car": 4,
+            "bus": 5, "truck": 4, "bicycle": 2, "motorcycle": 2,
+        }.get(label.lower())
+        if width_hint is not None:
+            return width_hint
     if distance_m is not None and distance_m > 0:
-        # Approximate steps (1 step ≈ 0.75m)
-        steps = max(1, int(round(distance_m / 0.75)))
-        if steps == 1:
-            return f"{base_phrase} about one step."
-        elif steps <= 3:
-            return f"{base_phrase} about {steps} steps."
-        else:
-            return f"{base_phrase} about {steps} steps."
-    
-    return base_phrase + "."
+        return max(1, int(round(distance_m / 0.75)))
+    return None
 
 
 def _haptic_for_direction(direction: Direction, urgent: bool = False) -> HapticPattern:
@@ -203,7 +221,7 @@ class SafetyAgent(BaseAgent):
             )[0]
             if self.policy.warning_confidence_ok(high.severity, high.confidence) and (ctx.motion.is_moving or high.is_immediate()):
                 prefix = "Stop." if high.is_immediate() or high.severity == "critical" else "Caution."
-                avoidance = _avoidance_phrase(high.direction, high.distance_m) if high.direction else ""
+                avoidance = _avoidance_phrase(high.direction, high.distance_m, high.kind) if high.direction else ""
                 return AgentDecision(
                     action=AgentAction.WARN,
                     priority=100 if high.is_immediate() else 85,
@@ -240,7 +258,7 @@ class SafetyAgent(BaseAgent):
                 or _partial_edge_requires_stop(det)
             )
             subject = f"partially visible {det.label}" if partial_edge else det.label
-            avoidance = _avoidance_phrase(det.direction, det.distance_m)
+            avoidance = _avoidance_phrase(det.direction, det.distance_m, det.label)
             # Omit distance for immediate obstacles (≤1.0m) for brevity
             distance_str = "" if (det.distance_m is not None and det.distance_m <= 1.0) else f", {_detection_distance_phrase(det)}"
             return AgentDecision(
@@ -296,7 +314,7 @@ class SafetyAgent(BaseAgent):
                 det = sorted(immediate, key=lambda d: d.distance_m if d.distance_m is not None else 99)[0]
                 partial_edge = _is_partial_edge_detection(det)
                 subject = f"partially visible {det.label}" if partial_edge else det.label
-                avoidance = _avoidance_phrase(det.direction, det.distance_m)
+                avoidance = _avoidance_phrase(det.direction, det.distance_m, det.label)
                 # Omit distance for immediate obstacles (≤1.0m) for brevity
                 distance_str = "" if (det.distance_m is not None and det.distance_m <= 1.0) else f", {_detection_distance_phrase(det)}"
                 return AgentDecision(
@@ -387,6 +405,11 @@ class SidewalkAgent(BaseAgent):
     name = "sidewalk"
 
     def handle(self, ctx: FrameContext) -> Optional[AgentDecision]:
+        # Suppress outdoor-only surface warnings when indoors — indoor floors
+        # (tile, concrete) frequently trigger false road/sidewalk detections.
+        if ctx.scene.is_indoor and not _user_is_asking_about_sidewalk(ctx):
+            return None
+
         if not ctx.surfaces:
             if _user_is_asking_about_sidewalk(ctx):
                 return AgentDecision(
@@ -513,7 +536,7 @@ class TrafficAgent(BaseAgent):
     name = "traffic"
 
     def handle(self, ctx: FrameContext) -> Optional[AgentDecision]:
-        if ctx.scene.location_type not in {"sidewalk", "street", "street_crossing", "outdoor", "unknown"}:
+        if ctx.scene.is_indoor:
             return None
 
         # Check for moving vehicles
@@ -549,7 +572,7 @@ class TrafficAgent(BaseAgent):
         is_fast = speed_mps > 5.0
         is_close = det.distance_m is not None and det.distance_m < 5.0
 
-        avoidance = _avoidance_phrase(det.direction, det.distance_m)
+        avoidance = _avoidance_phrase(det.direction, det.distance_m, det.label)
         if is_approaching and (is_fast or is_close):
             priority = 100  # Critical
             message = f"Stop! {det.label} approaching. {avoidance}"
@@ -586,6 +609,11 @@ class CrossingSignalAgent(BaseAgent):
     name = "crossing_signal"
 
     def handle(self, ctx: FrameContext) -> Optional[AgentDecision]:
+        # No crossing signals indoors — skip to avoid false positives from
+        # indoor signage or colored lights.
+        if ctx.scene.is_indoor:
+            return None
+
         signal = _best_crossing_signal(ctx.detections)
         if signal:
             category = _signal_category(signal)
@@ -713,7 +741,7 @@ class IndoorNavigationAgent(BaseAgent):
     NON_OBSTACLE_LABELS = {"traffic light", "stop sign", "fire hydrant", "parking meter", "backpack", "handbag", "suitcase", "tie", "umbrella"}
 
     def handle(self, ctx: FrameContext) -> Optional[AgentDecision]:
-        if ctx.scene.location_type not in {"hallway", "room", "corridor", "building", "indoor", "unknown"}:
+        if ctx.scene.location_type not in INDOOR_LOCATION_TYPES and ctx.scene.location_type != "unknown":
             return None
 
         if ctx.user.mode == "orientation" or not ctx.motion.is_moving:
@@ -756,27 +784,22 @@ class IndoorNavigationAgent(BaseAgent):
         blocking.sort(key=lambda d: (d.distance_m if d.distance_m is not None else 99, -d.confidence))
         nearest = blocking[0]
 
-        # Suggest avoidance direction
-        if nearest.direction == Direction.SLIGHT_LEFT or nearest.direction == Direction.CENTER:
-            avoid_dir = "right"
-            avoid_haptic = HapticPattern.RIGHT
-        else:
-            avoid_dir = "left"
-            avoid_haptic = HapticPattern.LEFT
+        # Cluster nearby obstacles to describe groups instead of just the nearest
+        cluster_labels = _cluster_obstacle_labels(blocking)
 
-        obstacle_list = ", ".join(sorted({d.label.lower() for d in blocking}))
-        distance = _distance_phrase(nearest.distance_m)
+        # Build obstacle-type-aware avoidance instruction
+        instruction = _indoor_obstacle_instruction(nearest, blocking, cluster_labels)
 
         if nearest.distance_m is not None and nearest.distance_m <= 1.0:
             return AgentDecision(
                 action=AgentAction.WARN,
                 priority=78,
-                message=f"Indoor obstacle: {nearest.label} {_direction_phrase(nearest.direction)}, {distance}. Move {avoid_dir} to go around.",
-                haptic=avoid_haptic,
+                message=instruction,
+                haptic=_obstacle_avoidance_haptic(nearest),
                 agents_consulted=[self.name],
                 debug={
                     "blocking_objects": [d.model_dump() for d in blocking],
-                    "avoidance_direction": avoid_dir,
+                    "cluster_labels": cluster_labels,
                     "reason": "indoor-obstacle-close",
                 },
             )
@@ -784,14 +807,147 @@ class IndoorNavigationAgent(BaseAgent):
         return AgentDecision(
             action=AgentAction.GUIDE,
             priority=68,
-            message=f"{nearest.label.capitalize()} ahead {_direction_phrase(nearest.direction)}, {distance}. Veer {avoid_dir} to avoid.",
-            haptic=avoid_haptic,
+            message=instruction,
+            haptic=_obstacle_avoidance_haptic(nearest),
             agents_consulted=[self.name],
             debug={
                 "blocking_objects": [d.model_dump() for d in blocking],
-                "avoidance_direction": avoid_dir,
+                "cluster_labels": cluster_labels,
                 "reason": "indoor-obstacle-avoidance",
             },
+        )
+
+
+def _obstacle_avoidance_haptic(det: Detection) -> HapticPattern:
+    if det.direction in {Direction.SLIGHT_LEFT, Direction.LEFT, Direction.CENTER}:
+        return HapticPattern.RIGHT
+    return HapticPattern.LEFT
+
+
+def _cluster_obstacle_labels(blocking: List[Detection]) -> str:
+    """Describe a group of blocking objects concisely."""
+    labels = sorted({d.label.lower() for d in blocking})
+    if len(labels) == 1:
+        count = len(blocking)
+        label = labels[0]
+        if count > 1:
+            return f"{count} {label}s" if not label.endswith("s") else f"{count} {label}"
+        return label
+    if len(labels) == 2:
+        return f"{labels[0]} and {labels[1]}"
+    return f"{labels[0]}, {labels[1]}, and {len(labels) - 2} more"
+
+
+def _indoor_obstacle_instruction(nearest: Detection, blocking: List[Detection], cluster_labels: str) -> str:
+    """Build obstacle-type-aware avoidance instructions for indoor navigation."""
+    label = nearest.label.lower()
+    direction = _direction_phrase(nearest.direction)
+    distance = _distance_phrase(nearest.distance_m)
+    avoidance = _avoidance_phrase(nearest.direction, nearest.distance_m, label)
+
+    # Obstacle-specific instructions with concrete body guidance
+    if label in {"chair", "bench"}:
+        if nearest.distance_m is not None and nearest.distance_m <= 1.0:
+            return f"{label.capitalize()} {direction}. {avoidance}"
+        return f"{label.capitalize()} ahead {direction}, {distance}. {avoidance}"
+    if label in {"dining table", "table"}:
+        if nearest.distance_m is not None and nearest.distance_m <= 1.0:
+            return f"Table edge {direction}. Trail your hand along it and step around."
+        return f"Table ahead {direction}, {distance}. {avoidance}"
+    if label == "person":
+        if nearest.distance_m is not None and nearest.distance_m <= 1.5:
+            return f"Person {direction}, {distance}. {avoidance}"
+        return f"Person ahead {direction}, {distance}. {avoidance}"
+    if label == "couch":
+        return f"Couch {direction}, {distance}. {avoidance}"
+    if label == "door":
+        return f"Door {direction}, {distance}. Reach forward to find the handle."
+
+    # Multiple grouped obstacles
+    if len(blocking) > 1:
+        return f"{cluster_labels} ahead {direction}, nearest {distance}. {avoidance}"
+
+    # Generic fallback
+    if nearest.distance_m is not None and nearest.distance_m <= 1.0:
+        return f"Obstacle {direction}: {label}. {avoidance}"
+    return f"{label.capitalize()} ahead {direction}, {distance}. {avoidance}"
+
+
+class ExitSeekingAgent(BaseAgent):
+    """Guides the user to find a door/exit when leaving a building.
+
+    Activated when the route indicates the user needs to exit (the route
+    context contains ``exit_seeking=True``) and we are indoors without
+    indoor map data.  The agent watches for door detections in the frame
+    and tells the user which direction to turn to reach the door.
+    """
+
+    name = "exit_seeking"
+
+    def handle(self, ctx: FrameContext) -> Optional[AgentDecision]:
+        if not ctx.route.active:
+            return None
+        # Only engage when route metadata signals exit-seeking phase.
+        if not getattr(ctx.route, "exit_seeking", False):
+            return None
+        if not ctx.scene.is_indoor:
+            return None
+
+        # Look for door detections in the frame
+        doors = [
+            d for d in ctx.detections
+            if d.label.lower() == "door" and d.confidence >= 0.45
+        ]
+
+        # Also check surface observations for detected door handles
+        door_surfaces = [
+            s for s in ctx.surfaces
+            if s.kind == SurfaceKind.DOOR and s.confidence >= 0.55
+        ]
+
+        if doors:
+            nearest = sorted(doors, key=lambda d: d.distance_m if d.distance_m is not None else 99)[0]
+            direction = _direction_phrase(nearest.direction)
+            distance = _distance_phrase(nearest.distance_m)
+            return AgentDecision(
+                action=AgentAction.GUIDE,
+                priority=73,
+                message=f"Door detected {direction}, {distance}. Head toward it to exit.",
+                haptic=_haptic_for_direction(nearest.direction),
+                agents_consulted=[self.name],
+                debug={"door_detection": nearest.model_dump(), "reason": "exit-door-detected"},
+            )
+
+        if door_surfaces:
+            surface = door_surfaces[0]
+            return AgentDecision(
+                action=AgentAction.GUIDE,
+                priority=73,
+                message=_door_guidance_message(surface) + " This may be your exit.",
+                haptic=_door_haptic(surface),
+                agents_consulted=[self.name, "door_guidance"],
+                debug={"surface": surface.model_dump(), "reason": "exit-handle-detected"},
+            )
+
+        # No door visible — instruct user to scan
+        if not ctx.motion.is_moving:
+            return AgentDecision(
+                action=AgentAction.ASK,
+                priority=65,
+                message="Looking for an exit. Slowly turn right and scan for a door or exit sign.",
+                haptic=HapticPattern.CAUTION,
+                agents_consulted=[self.name],
+                debug={"reason": "exit-scanning"},
+            )
+
+        # Moving but no door yet — trail the wall
+        return AgentDecision(
+            action=AgentAction.GUIDE,
+            priority=62,
+            message="No exit visible yet. Trail your hand along the wall and keep walking.",
+            haptic=HapticPattern.CAUTION,
+            agents_consulted=[self.name],
+            debug={"reason": "exit-wall-trailing"},
         )
 
 

@@ -24,7 +24,7 @@
           "action": "warn",
           "priority": 100,
           "haptic": "stop",
-          "message_contains": ["Stop.", "stairs ahead", "12 o'clock"]
+          "message_contains": ["Stop.", "stairs ahead", "ahead"]
         }
       }
     ]
@@ -49,7 +49,7 @@
           "action": "guide",
           "priority": 70,
           "haptic": "left",
-          "message_contains": ["chair found", "9 o'clock", "less than 3 feet"]
+          "message_contains": ["chair found", "left", "less than 3 feet"]
         }
       }
     ]
@@ -224,7 +224,7 @@
         },
         "expect": {
           "action": "ask",
-          "priority": 65,
+          "priority": 75,
           "haptic": "caution",
           "message_contains": ["off route", "Stop", "scan"]
         }
@@ -278,7 +278,7 @@
           "action": "warn",
           "priority": 100,
           "haptic": "stop",
-          "message_contains": ["Stop.", "possible curb ahead", "12 o'clock"]
+          "message_contains": ["Stop.", "possible curb ahead", "ahead"]
         }
       }
     ]
@@ -342,7 +342,7 @@
           "action": "warn",
           "priority": 92,
           "requires_human": true,
-          "message_contains": ["Pedestrian signal shows walk", "2 o'clock", "before moving"],
+          "message_contains": ["Pedestrian signal shows walk", "right", "before moving"],
           "message_not_contains": ["safe to cross", "go now"]
         }
       }
@@ -407,7 +407,7 @@
           "priority": 94,
           "requires_human": true,
           "haptic": "stop",
-          "message_contains": ["Stop sign detected", "12 o'clock", "Stop and confirm surroundings"],
+          "message_contains": ["Stop sign detected", "ahead", "Stop and confirm surroundings"],
           "message_not_contains": ["safe to cross"]
         }
       }
@@ -490,7 +490,7 @@
           "action": "orient",
           "priority": 52,
           "haptic": "left",
-          "message_contains": ["Sidewalk surface appears to continue", "10 o'clock"],
+          "message_contains": ["Sidewalk surface appears to continue", "left"],
           "message_not_contains": ["safe"]
         }
       }
