@@ -130,11 +130,11 @@ def _speed_phrase(speed_mps: float) -> str:
 
 def _direction_phrase(direction: Direction) -> str:
     return {
-        Direction.LEFT: "at 9 o'clock",
-        Direction.SLIGHT_LEFT: "at 10 o'clock",
-        Direction.CENTER: "at 12 o'clock",
-        Direction.SLIGHT_RIGHT: "at 2 o'clock",
-        Direction.RIGHT: "at 3 o'clock",
+        Direction.LEFT: "left",
+        Direction.SLIGHT_LEFT: "left",
+        Direction.CENTER: "ahead",
+        Direction.SLIGHT_RIGHT: "right",
+        Direction.RIGHT: "right",
         Direction.UNKNOWN: "ahead",
     }[direction]
 
@@ -142,12 +142,12 @@ def _direction_phrase(direction: Direction) -> str:
 def _avoidance_phrase(direction: Direction) -> str:
     """Return a phrase telling the user which way to move to avoid the obstacle."""
     return {
-        Direction.LEFT: "Move to your right to go around it.",
-        Direction.SLIGHT_LEFT: "Move to your right to go around it.",
-        Direction.CENTER: "Step to your left or right to go around it.",
-        Direction.SLIGHT_RIGHT: "Move to your left to go around it.",
-        Direction.RIGHT: "Move to your left to go around it.",
-        Direction.UNKNOWN: "Step to your left or right to go around it.",
+        Direction.LEFT: "Move right.",
+        Direction.SLIGHT_LEFT: "Move right.",
+        Direction.CENTER: "Move left or right.",
+        Direction.SLIGHT_RIGHT: "Move left.",
+        Direction.RIGHT: "Move left.",
+        Direction.UNKNOWN: "Move left or right.",
     }[direction]
 
 
@@ -229,13 +229,14 @@ class SafetyAgent(BaseAgent):
             )
             subject = f"partially visible {det.label}" if partial_edge else det.label
             avoidance = _avoidance_phrase(det.direction)
+            # Omit distance for immediate obstacles (≤1.0m) for brevity
+            distance_str = "" if (det.distance_m is not None and det.distance_m <= 1.0) else f", {_detection_distance_phrase(det)}"
             return AgentDecision(
                 action=AgentAction.WARN,
                 priority=95 if is_stop else 82 if partial_edge else 80,
                 message=(
                     f"{'Stop' if is_stop else 'Caution'}: {subject} "
-                    f"{_direction_phrase(det.direction)}, {_detection_distance_phrase(det)}. "
-                    f"{avoidance}"
+                    f"{_direction_phrase(det.direction)}{distance_str}. {avoidance}"
                 ),
                 haptic=_haptic_for_direction(det.direction, urgent=is_stop),
                 agents_consulted=[self.name, "partial_edge" if partial_edge else "object_distance"],
@@ -284,12 +285,13 @@ class SafetyAgent(BaseAgent):
                 partial_edge = _is_partial_edge_detection(det)
                 subject = f"partially visible {det.label}" if partial_edge else det.label
                 avoidance = _avoidance_phrase(det.direction)
+                # Omit distance for immediate obstacles (≤1.0m) for brevity
+                distance_str = "" if (det.distance_m is not None and det.distance_m <= 1.0) else f", {_detection_distance_phrase(det)}"
                 return AgentDecision(
                     action=AgentAction.WARN,
                     priority=95,  # Always stop for immediate unknown obstacles
                     message=(
-                        f"Stop: {subject} {_direction_phrase(det.direction)}, "
-                        f"{_detection_distance_phrase(det)}. {avoidance}"
+                        f"Stop: {subject} {_direction_phrase(det.direction)}{distance_str}. {avoidance}"
                     ),
                     haptic=_haptic_for_direction(det.direction, urgent=True),
                     agents_consulted=[self.name, "partial_edge" if partial_edge else "universal_proximity"],
@@ -307,9 +309,10 @@ class SafetyAgent(BaseAgent):
                     if surface.confidence >= 0.5 and surface.distance_m is not None and surface.distance_m <= 1.2:
                         priority = 95 if surface.distance_m <= 0.8 else 85
                         avoidance = _avoidance_phrase(surface.direction)
+                        # Omit distance for immediate obstacles (≤1.0m) for brevity
+                        distance_str = "" if surface.distance_m <= 1.0 else f" {_distance_phrase(surface.distance_m)}"
                         message = (
-                            f"Stop: partially visible obstacle {_direction_phrase(surface.direction)} "
-                            f"{_distance_phrase(surface.distance_m)}. {avoidance}"
+                            f"Stop: partially visible obstacle {_direction_phrase(surface.direction)}{distance_str}. {avoidance}"
                         )
                         return AgentDecision(
                             action=AgentAction.WARN,
@@ -537,19 +540,19 @@ class TrafficAgent(BaseAgent):
         avoidance = _avoidance_phrase(det.direction)
         if is_approaching and (is_fast or is_close):
             priority = 100  # Critical
-            message = f"Stop! {det.label.capitalize()} approaching quickly at {_speed_phrase(speed_mps)}. {avoidance}"
+            message = f"Stop! {det.label} approaching. {avoidance}"
             haptic = HapticPattern.STOP
         elif is_approaching:
             priority = 95
-            message = f"Caution: {det.label.capitalize()} moving toward you at {_speed_phrase(speed_mps)}. {avoidance}"
+            message = f"Caution: {det.label} moving toward you. {avoidance}"
             haptic = HapticPattern.STOP
         elif is_fast:
             priority = 90
-            message = f"Fast-moving {det.label} {_direction_phrase(det.direction)} at {_speed_phrase(speed_mps)}. {avoidance}"
+            message = f"Fast {det.label} {_direction_phrase(det.direction)}. {avoidance}"
             haptic = HapticPattern.CAUTION
         else:
             priority = 85
-            message = f"{det.label.capitalize()} moving {_direction_phrase(det.direction)} at {_speed_phrase(speed_mps)}. {avoidance}"
+            message = f"{det.label} {_direction_phrase(det.direction)}. {avoidance}"
             haptic = HapticPattern.CAUTION
 
         return AgentDecision(

@@ -116,7 +116,7 @@ def test_target_finding_guides_to_best_matching_detection() -> None:
     assert decision.action == AgentAction.GUIDE
     assert decision.priority == 70
     assert decision.haptic == HapticPattern.LEFT
-    assert decision.message == "chair found at 9 o'clock, less than 3 feet away."
+    assert decision.message == "chair found left, less than 3 feet away."
     assert decision.debug["target"] == "chair"
 
 
@@ -142,7 +142,7 @@ def test_confirmed_critical_warning_can_speak_below_default_detection_confidence
     assert decision.action == AgentAction.WARN
     assert decision.priority == 100
     assert decision.message.startswith("Stop. Possible curb ahead")
-    assert "at 12 o'clock" in decision.message
+    assert "ahead" in decision.message
 
 
 def test_repeated_urgent_warning_uses_short_throttle() -> None:
@@ -266,7 +266,7 @@ def test_crossing_signal_agent_describes_walk_signal_without_permission() -> Non
 
     assert decision.action == AgentAction.WARN
     assert decision.priority == 92
-    assert "Pedestrian signal shows walk at 2 o'clock" in decision.message
+    assert "Pedestrian signal shows walk right" in decision.message
     assert "before moving" in decision.message
     assert "safe to cross" not in decision.message.lower()
 
@@ -291,7 +291,7 @@ def test_crossing_signal_agent_categorizes_traffic_light_state() -> None:
 
     assert decision.action == AgentAction.WARN
     assert decision.priority == 92
-    assert "Traffic light appears green at 9 o'clock" in decision.message
+    assert "Traffic light appears green left" in decision.message
     assert "Vehicle lights may not match pedestrian signals" in decision.message
     assert "safe to cross" not in decision.message.lower()
 
@@ -318,7 +318,7 @@ def test_crossing_signal_agent_treats_stop_sign_as_stop_warning() -> None:
     assert decision.priority == 94
     assert decision.haptic == HapticPattern.STOP
     assert decision.requires_human is True
-    assert "Stop sign detected at 12 o'clock" in decision.message
+    assert "Stop sign detected ahead" in decision.message
     assert "Stop and confirm surroundings before moving" in decision.message
     assert "safe to cross" not in decision.message.lower()
 
@@ -363,7 +363,7 @@ def test_sidewalk_agent_stops_for_road_surface_ahead() -> None:
     assert decision.priority == 96
     assert decision.haptic == HapticPattern.STOP
     assert decision.requires_human is True
-    assert "Road surface appears at 12 o'clock" in decision.message
+    assert "Road surface appears ahead" in decision.message
     assert "safe" not in decision.message.lower()
 
 
@@ -389,7 +389,7 @@ def test_sidewalk_agent_warns_for_curb_edge_ahead() -> None:
     assert decision.action == AgentAction.WARN
     assert decision.priority == 95
     assert decision.haptic == HapticPattern.STOP
-    assert "possible curb edge at 12 o'clock" in decision.message
+    assert "possible curb edge ahead" in decision.message
 
 
 def test_sidewalk_agent_orients_to_visible_sidewalk_when_asked() -> None:
@@ -415,7 +415,7 @@ def test_sidewalk_agent_orients_to_visible_sidewalk_when_asked() -> None:
     assert decision.action == AgentAction.ORIENT
     assert decision.priority == 52
     assert decision.haptic == HapticPattern.LEFT
-    assert "Sidewalk surface appears to continue at 10 o'clock" in decision.message
+    assert "Sidewalk surface appears to continue left" in decision.message
     assert "safe" not in decision.message.lower()
 
 
@@ -457,7 +457,7 @@ def test_far_person_and_stop_sign_stop_sign_wins() -> None:
     assert decision.priority == 94
     assert decision.haptic == HapticPattern.STOP
     assert decision.requires_human is True
-    assert "Stop sign detected at 2 o'clock" in decision.message
+    assert "Stop sign detected right" in decision.message
     assert "safe to cross" not in decision.message.lower()
 
 
@@ -542,7 +542,7 @@ def test_universal_proximity_warning_stops_for_any_close_object() -> None:
     assert decision.action == AgentAction.WARN
     assert decision.priority == 95
     assert decision.haptic == HapticPattern.STOP
-    assert decision.message == "Stop: laptop at 12 o'clock, less than 3 feet away. Step to your left or right to go around it."
+    assert decision.message == "Stop: laptop ahead. Move left or right."
     assert decision.debug["reason"] == "universal-proximity-immediate"
 
 
@@ -574,7 +574,7 @@ def test_partial_edge_hazard_warns_when_object_is_cut_off_by_camera() -> None:
     assert decision.priority == 82
     assert decision.haptic == HapticPattern.RIGHT
     assert decision.agents_consulted == ["safety", "partial_edge"]
-    assert "partially visible chair at 3 o'clock" in decision.message
+    assert "partially visible chair right" in decision.message
     assert "distance is uncertain" in decision.message
     assert decision.debug["reason"] == "partial-edge object-distance hazard"
 

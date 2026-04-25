@@ -131,7 +131,7 @@ class VisionConfig:
 
     # Demo defaults. On a phone these should come from IMU/GPS/user state.
     assume_moving: bool = True
-    location_type: str = "unknown"
+    location_type: str = "indoor"  # Default to indoor to prevent outdoor hallucinations
     visual_confidence: float = 0.75
 
     # Calibration multiplier for the monocular distance heuristic. Increase if
