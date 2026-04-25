@@ -4,6 +4,7 @@
     "slug": "lahacks-nav",
     "scheme": "lahacksnav",
     "version": "0.1.0",
+    "jsEngine": "jsc",
     "orientation": "portrait",
     "platforms": [
       "ios",
