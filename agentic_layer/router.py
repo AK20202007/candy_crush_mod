@@ -19,7 +19,7 @@ class AgenticNavigationRouter:
 
     def __init__(
         self,
-        min_repeat_interval_ms: int = 1800,
+        min_repeat_interval_ms: int = 1400,
         min_urgent_repeat_interval_ms: int = 1000,
         policy: Optional[SafetyPolicy] = None,
     ):
@@ -75,7 +75,7 @@ class AgenticNavigationRouter:
         if decision.priority >= 90:
             interval = self.min_urgent_repeat_interval_ms
         elif decision.action == AgentAction.GUIDE:
-            interval = max(3000, self.min_repeat_interval_ms)  # At least 3s but let nav through
+            interval = max(2000, self.min_repeat_interval_ms)  # At least 2s but let nav through
         else:
             interval = self.min_repeat_interval_ms
         if same_as_last and now - self._last_message_at_ms < interval:

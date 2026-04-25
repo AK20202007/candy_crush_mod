@@ -12,7 +12,7 @@
     "distance_scale": 1.0,
     "visual_confidence": 0.75,
     "location_type": "unknown",
-    "agent_repeat_ms": 4500,
+    "agent_repeat_ms": 2500,
     "agent_urgent_repeat_ms": 1000
   },
   "indoor_cautious": {
@@ -20,7 +20,7 @@
     "model_path": "yolov8n.pt",
     "conf": 0.32,
     "iou": 0.5,
-    "imgsz": 960,
+    "imgsz": 640,
     "confirm_frames": 3,
     "obstacle_area_ratio": 0.1,
     "person_center_radius": 0.2,
@@ -28,15 +28,15 @@
     "distance_scale": 1.0,
     "visual_confidence": 0.8,
     "location_type": "hallway",
-    "agent_repeat_ms": 5000,
-    "agent_urgent_repeat_ms": 1200
+    "agent_repeat_ms": 3000,
+    "agent_urgent_repeat_ms": 1000
   },
   "outdoor_sidewalk": {
     "description": "Outdoor sidewalk testing profile with faster urgent cadence and crossing-safe defaults.",
     "model_path": "yolov8n.pt",
     "conf": 0.38,
     "iou": 0.45,
-    "imgsz": 960,
+    "imgsz": 640,
     "confirm_frames": 2,
     "obstacle_area_ratio": 0.09,
     "person_center_radius": 0.16,
@@ -44,7 +44,7 @@
     "distance_scale": 1.1,
     "visual_confidence": 0.7,
     "location_type": "sidewalk",
-    "agent_repeat_ms": 4000,
+    "agent_repeat_ms": 2500,
     "agent_urgent_repeat_ms": 900
   },
   "low_light": {
@@ -52,7 +52,7 @@
     "model_path": "yolov8n.pt",
     "conf": 0.45,
     "iou": 0.5,
-    "imgsz": 960,
+    "imgsz": 640,
     "confirm_frames": 3,
     "obstacle_area_ratio": 0.12,
     "person_center_radius": 0.18,
@@ -60,8 +60,8 @@
     "distance_scale": 1.0,
     "visual_confidence": 0.35,
     "location_type": "unknown",
-    "agent_repeat_ms": 5500,
-    "agent_urgent_repeat_ms": 1200
+    "agent_repeat_ms": 3000,
+    "agent_urgent_repeat_ms": 1000
   },
   "debug_fast": {
     "description": "Fast local debugging profile with single-frame confirmation and short repeat windows.",

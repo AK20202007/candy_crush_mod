@@ -24,9 +24,17 @@ class SpeechController:
     """
 
     def __init__(self) -> None:
+        self._engine = pyttsx3.init()
+        # Slightly faster speech keeps the demo snappy (platform-dependent).
+        try:
+            rate = self._engine.getProperty("rate")
+            self._engine.setProperty("rate", int(rate * 1.35))
+        except Exception:
+            pass
+
         self._normal: queue.Queue[str] = queue.Queue()
-        # PriorityQueue for errors/urgent messages. Lower number = higher priority.
-        self._urgent: queue.PriorityQueue[tuple[int, float, str]] = queue.PriorityQueue()
+        self._urgent_pending = False
+        self._urgent_message: Optional[str] = None
         self._urgent_lock = threading.Lock()
 
         self._stop = threading.Event()
@@ -41,16 +49,11 @@ class SpeechController:
         self._stop.set()
         self._normal.put_nowait("")  # unblock queue.get if needed
 
-    def speak_urgent(self, message: str, priority: int = 10) -> None:
-        """Queue a high-priority safety message. Lower priority number wins."""
+    def speak_urgent(self, message: str) -> None:
+        """Queue a high-priority safety message (latest wins if several arrive quickly)."""
         with self._urgent_lock:
-            # Use timestamp to maintain FIFO ordering for items with the same priority
-            self._urgent.put((priority, time.time(), message))
-
-    def speak_emergency(self, message: str) -> None:
-        """Queue a critical emergency message that repeats many times (Highest Priority 0)."""
-        for _ in range(10):
-            self.speak_urgent(message, priority=0)
+            self._urgent_message = message
+            self._urgent_pending = True
 
     def speak_normal(self, message: str) -> None:
         """Queue a navigation-style message."""
@@ -61,8 +64,8 @@ class SpeechController:
     def _drain_normal_if_urgent(self) -> None:
         """Drop pending navigation lines when a warning must take priority."""
         with self._urgent_lock:
-            has_urgent = not self._urgent.empty()
-        if not has_urgent:
+            urgent = self._urgent_pending
+        if not urgent:
             return
         try:
             while True:
@@ -72,19 +75,14 @@ class SpeechController:
 
     def _pop_urgent(self) -> Optional[str]:
         with self._urgent_lock:
-            if self._urgent.empty():
+            if not self._urgent_pending:
                 return None
-            _, _, msg = self._urgent.get_nowait()
+            msg = self._urgent_message
+            self._urgent_pending = False
+            self._urgent_message = None
             return msg
 
     def _worker(self) -> None:
-        engine = pyttsx3.init()
-        try:
-            rate = engine.getProperty("rate")
-            engine.setProperty("rate", int(rate * 1.1))
-        except Exception:
-            pass
-
         while not self._stop.is_set():
             self._drain_normal_if_urgent()
             msg = self._pop_urgent()
@@ -96,7 +94,12 @@ class SpeechController:
             if msg == "":
                 continue
 
-            time.sleep(0.1)  # Brief pause before speaking
-            engine.say(msg + " ")
-            engine.runAndWait()
-            time.sleep(0.2)  # Wait for hardware to finish audio buffer
+            try:
+                # Stop may help skip to the next phrase on some backends (best-effort).
+                self._engine.stop()
+            except Exception:
+                pass
+
+            self._engine.say(msg)
+            self._engine.runAndWait()
+            time.sleep(0.05)  # Tiny pause so logs and engine stay stable between lines.

@@ -117,7 +117,7 @@ def run_navigation_loop(
     stop_event=None,
     route: Optional[List[str]] = None,
     repeat_route: bool = True,
-    startup_delay_s: float = 25.0,
+    startup_delay_s: float = 8.0,
     speak_urgent: Optional[Callable[[str], None]] = None,
 ) -> None:
     """
@@ -137,14 +137,14 @@ def run_navigation_loop(
     _speak_now = speak_urgent or speak
 
     # Phase 1: Announce destination and let obstacle detection settle
-    _speak_now(f"Destination set to {dest}. Scanning your surroundings for 25 seconds.")
+    _speak_now(f"Destination set to {dest}. Scanning surroundings.")
     print(f"[nav] Waiting {startup_delay_s}s before starting navigation prompts...")
     if _wait_interval(stop_event, startup_delay_s):
         return
 
     # Phase 2: Confirm and begin navigation
     _speak_now(f"Starting navigation to {dest}. I will guide you.")
-    if _wait_interval(stop_event, 3.0):
+    if _wait_interval(stop_event, 1.5):
         return
 
     steps = list(route) if route is not None else build_route(destination)
