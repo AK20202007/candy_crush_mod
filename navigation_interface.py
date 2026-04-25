@@ -2,7 +2,7 @@
 Navigation Interface - Integration layer for user-friendly assistive navigation
 
 Connects the agentic routing system with intelligent UI and speech controller
-to provide a production-ready experience for blind/low-vision users.
+to provide a controlled prototype experience for blind/low-vision navigation.
 """
 
 from __future__ import annotations

@@ -1,8 +1,8 @@
-# Assistive Navigation System 🧭
+# Assistive Navigation Prototype
 
-**A smart navigation assistant for blind and low-vision users.**
+**A controlled assistive-navigation prototype for blind and low-vision users.**
 
-This system uses your device's camera and AI to detect obstacles, provide safety warnings, and guide you to your destination - all through clear, spoken feedback.
+This system uses a camera, local perception, deterministic safety agents, and speech feedback to explore obstacle warnings, route prompts, and indoor interaction assistance. It is not a certified mobility aid and should only be tested in controlled settings with standard mobility techniques and a sighted spotter.
 
 ---
 
@@ -27,11 +27,11 @@ When prompted, type where you want to go:
 Enter destination: Library
 ```
 
-That's it! The system will start guiding you.
+The system starts the camera loop and routes all warnings/guidance through the safety router.
 
 ---
 
-## 🎯 What It Does
+## Prototype Capabilities
 
 ### Smart Safety Warnings
 - **"Stop. Person ahead, very close."** - Alerts when someone is in your path
@@ -42,6 +42,12 @@ That's it! The system will start guiding you.
 - **"Walk straight."** - Clear directional guidance
 - **"Turn left in 20 feet."** - Turn-by-turn directions
 - **"You are approaching your destination."** - Arrival notification
+- Map-backed route prompts when `--origin` and a supported map API key are provided
+
+### Door Assist
+- Detects visible door handles in controlled indoor scenes
+- Gives conservative side/height/hand guidance
+- Can be disabled with `--disable-door-assist`
 
 ### Smart Features
 - ✅ **No repetitive warnings** - Says it once, not constantly
@@ -63,6 +69,12 @@ python main.py -d "Student Center"
 
 # Text input (no voice)
 python main.py --typed-destination
+
+# Map-backed route state with safety warnings still taking priority
+GOOGLE_MAPS_API_KEY=... python main.py --origin "-118.448,34.070" -d "Rieber Hall UCLA"
+
+# Controlled indoor door-handle testing with head-mounted camera geometry
+python main.py --camera-mount head --location-type hallway -d "lobby"
 ```
 
 ### User Experience Levels
@@ -173,7 +185,7 @@ Options:
 
 ## ⚠️ Important Safety Notes
 
-**This system is an ASSISTIVE TOOL, not a replacement for:**
+**This system is a controlled prototype, not a replacement for:**
 - White cane
 - Guide dog
 - Human assistance
@@ -193,11 +205,14 @@ Options:
 
 ---
 
-## 📚 Documentation
+## Documentation
 
 - `USER_INTERFACE_GUIDE.md` - Complete user guide
 - `QUICK_START.md` - Quick reference
 - `IMPROVEMENTS_SUMMARY.md` - Technical details
+- `docs/PRODUCT_ROADMAP.md` - Product path, validation gates, and milestones
+- `docs/MANUAL_QA_PLAN.md` - Controlled test plan
+- `docs/TECHNICAL_ARCHITECTURE.md` - Safety architecture and contracts
 
 ---
 
@@ -330,4 +345,4 @@ python main.py
 
 ---
 
-*Version 2.0 - Production Ready*
+*Version 2.0 - Controlled Prototype*

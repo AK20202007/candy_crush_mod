@@ -162,6 +162,11 @@ class VisionConfig:
     # it with segmentation + depth.
     enable_surface_heuristic: bool = True
 
+    # Prototype door-handle interaction assist. This is useful for controlled
+    # indoor tests, but it should stay easy to disable while collecting
+    # validation data because handle geometry varies widely by building.
+    enable_door_assist: bool = True
+
     @property
     def is_head_mounted(self) -> bool:
         return self.camera_mount == "head"
@@ -669,15 +674,16 @@ class VisionSystem:
             import traceback
             traceback.print_exc()
 
-        # Door detection using vertical edge patterns
-        try:
-            door = self._detect_door(frame, w, h)
-            if door is not None:
-                observations.append(door)
-        except Exception as e:
-            print(f"[vision] Door detection error: {e}")
-            import traceback
-            traceback.print_exc()
+        if self._cfg.enable_door_assist:
+            # Door detection using handle-first geometry and door-frame context.
+            try:
+                door = self._detect_door(frame, w, h)
+                if door is not None:
+                    observations.append(door)
+            except Exception as e:
+                print(f"[vision] Door detection error: {e}")
+                import traceback
+                traceback.print_exc()
 
         # White object detection for low-contrast obstacles (white tables, boxes)
         try:

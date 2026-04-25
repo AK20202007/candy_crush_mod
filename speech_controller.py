@@ -2,7 +2,7 @@
 Intelligent Speech Controller for Assistive Navigation
 
 Integrates user preferences, smart timing, and context-aware feedback
-to provide a production-ready audio interface for blind/low-vision users.
+to provide a controlled prototype audio interface for blind/low-vision users.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from user_interface import AlertType, UserInterface, UserPreferences
 
 class IntelligentSpeechController:
     """
-    Production-ready speech controller with intelligent timing and prioritization.
+    Prototype speech controller with intelligent timing and prioritization.
     
     Features:
     - Priority-based speech queue (urgent warnings interrupt navigation)

@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "codex/**"
+
+jobs:
+  python:
+    name: Python prototype
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Compile Python modules
+        run: python -B -m py_compile main.py vision.py agentic_layer/*.py
+
+      - name: Run Python checks
+        run: |
+          python -B tests/test_agentic_router.py
+          python -B tests/test_vision_signal_state.py
+          python -B tests/test_architecture_contracts.py
+          python -B tests/test_database.py
+          python -B tests/test_main_route_state.py
+          python -B tests/test_voice_input.py
+          python -B tests/run_router_scenarios.py
+          python -B main.py --help
+
+  mobile:
+    name: Mobile TypeScript
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: mobile/package-lock.json
+
+      - name: Install mobile dependencies
+        run: npm ci
+
+      - name: Typecheck mobile app
+        run: npm run typecheck

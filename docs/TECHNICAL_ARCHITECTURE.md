@@ -119,6 +119,8 @@ Supported kinds:
 - `road`
 - `curb`
 - `crosswalk`
+- `obstacle_edge`
+- `door`
 - `unknown`
 
 Important fields:
@@ -132,6 +134,35 @@ Important fields:
 The current webcam implementation produces conservative color/edge heuristic
 observations. Production sidewalk navigation should use semantic segmentation
 and depth/LiDAR, then emit the same contract.
+
+### Door Assist
+
+Door-handle detection is a feature-gated prototype surface observation:
+
+```text
+camera frame
+        |
+        v
+handle-first geometry + optional door-frame context
+        |
+        v
+SurfaceObservation(kind="door", attributes={
+  "handle_detected": true,
+  "handle_side": "right",
+  "recommended_hand": "right",
+  "handle_height_zone": "waist height"
+})
+        |
+        v
+SafetyAgent / IndoorNavigationAgent
+        |
+        v
+"Door handle on the right, waist height... gently test whether the door pushes or pulls."
+```
+
+This behavior can be disabled with `--disable-door-assist`. It should remain
+behind that switch until enough indoor clips are labeled and manually tested
+across handle types, lighting, partial occlusion, and camera mounting positions.
 
 ### FrameContext
 

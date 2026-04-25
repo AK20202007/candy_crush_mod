@@ -107,6 +107,21 @@ def test_door_handle_detector_finds_horizontal_lever() -> None:
     assert obs.attributes["handle_bbox"][0] < obs.attributes["handle_bbox"][2]
 
 
+def test_door_assist_gate_skips_door_detector() -> None:
+    frame = np.zeros((240, 320, 3), dtype=np.uint8)
+    vision = object.__new__(VisionSystem)
+    vision._cfg = VisionConfig(enable_door_assist=False)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("door detector should not run when door assist is disabled")
+
+    vision._detect_door = fail_if_called
+
+    observations = vision._surface_observations(frame, 320, 240)
+
+    assert all(obs.kind != SurfaceKind.DOOR for obs in observations)
+
+
 def main() -> None:
     test_green_traffic_light_crop_is_categorized()
     test_red_traffic_light_crop_is_categorized()
@@ -114,6 +129,7 @@ def main() -> None:
     test_surface_crop_identifies_dark_gray_as_road()
     test_detection_from_bbox_marks_frame_edge_partial()
     test_door_handle_detector_finds_horizontal_lever()
+    test_door_assist_gate_skips_door_detector()
     print("vision signal state tests passed")
 
 
