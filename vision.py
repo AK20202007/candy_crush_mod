@@ -11,6 +11,7 @@ instead of immediately speaking from inside the vision loop.
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set
 
