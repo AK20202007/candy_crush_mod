@@ -55,6 +55,12 @@ class SpeechController:
             self._urgent_message = message
             self._urgent_pending = True
 
+    def speak_emergency(self, message: str) -> None:
+        """Queue a critical emergency message that repeats many times."""
+        # For simplicity in this prototype, we'll just repeat the message in the queue.
+        for _ in range(10):
+            self.speak_urgent(message)
+
     def speak_normal(self, message: str) -> None:
         """Queue a navigation-style message."""
         if self._stop.is_set():
