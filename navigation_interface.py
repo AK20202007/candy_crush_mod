@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 from agentic_layer import AgentAction, AgentDecision, AgenticNavigationRouter
 from agentic_layer.models import FrameContext
+from elevenlabs_speech import ElevenLabsSpeechController, create_elevenlabs_controller
 from speech_controller import AlertType, IntelligentSpeechController
 from user_interface import SystemState, UserInterface, UserMode, UserPreferences
 
@@ -34,7 +35,7 @@ class NavigationInterface:
     ):
         self.router = router
         self.ui = UserInterface(preferences)
-        self.speech = IntelligentSpeechController(self.ui)
+        self.speech = ElevenLabsSpeechController(user_interface=self.ui)
         
         # State tracking
         self._last_decision: Optional[AgentDecision] = None

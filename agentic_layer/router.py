@@ -29,8 +29,8 @@ class AgenticNavigationRouter:
             SidewalkAgent(self.policy),
             CrossingSignalAgent(self.policy),
             TargetFindingAgent(self.policy),
-            IndoorNavigationAgent(self.policy),
             WayfindingAgent(self.policy),
+            IndoorNavigationAgent(self.policy),
             OrientationAgent(self.policy),
             FallbackAgent(self.policy),
         ]

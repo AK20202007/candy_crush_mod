@@ -132,6 +132,7 @@ class NavigationApp:
                 iou=args.iou or 0.5,
                 augment=args.augment,
                 half=not args.no_half,
+                camera_mount=args.camera_mount
             )
             
             def handle_decision(decision):
