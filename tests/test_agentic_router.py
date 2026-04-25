@@ -542,7 +542,7 @@ def test_universal_proximity_warning_stops_for_any_close_object() -> None:
     assert decision.action == AgentAction.WARN
     assert decision.priority == 95
     assert decision.haptic == HapticPattern.STOP
-    assert decision.message == "Stop: laptop at 12 o'clock, less than 3 feet away."
+    assert decision.message == "Stop: laptop at 12 o'clock, less than 3 feet away. Step to your left or right to go around it."
     assert decision.debug["reason"] == "universal-proximity-immediate"
 
 

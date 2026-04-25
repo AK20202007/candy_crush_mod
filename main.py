@@ -265,6 +265,7 @@ def main() -> None:
             "stop_event": stop_event,
             "route": indoor_route_steps if indoor_route_steps else nav_route,
             "repeat_route": repeat_nav,
+            "speak_urgent": speech.speak_urgent,
         },
         name="Navigation",
         daemon=True,

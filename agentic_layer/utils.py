@@ -100,6 +100,7 @@ def detection_from_bbox(
             "bottom_y_ratio": bbox.y2 / max(1.0, frame_height),
             "edge_contact": edge_contact,
             "edge_truncated": edge_truncated,
+            "bbox": [bbox.x1, bbox.y1, bbox.x2, bbox.y2],  # For vehicle tracking
             "partial_visibility": "frame_edge" if edge_truncated else "full_bbox",
             "distance_reliability": "low" if edge_truncated else "normal",
             "distance_inches_heuristic": distance_inches,

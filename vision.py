@@ -228,6 +228,10 @@ class VisionSystem:
 
         self._consec_warning_hits: Dict[str, int] = {}
         self._last_spoken: Optional[str] = None
+        
+        # Vehicle tracking for speed and direction estimation
+        self._vehicle_tracks: Dict[str, List[Dict]] = {}  # track_id -> list of detections
+        self._last_track_cleanup = time.time()
 
         use_half = self._cfg.half if self._cfg.half is not None else bool(torch.cuda.is_available())
         self._predict_half = bool(use_half and torch.cuda.is_available())
@@ -262,6 +266,12 @@ class VisionSystem:
                         print("[vision] Failed to read frame from webcam")
                         time.sleep(0.1)
                         continue
+
+                    # Flip horizontally: webcams produce mirrored (selfie)
+                    # images, so left in the real world appears as right on
+                    # screen.  Flipping corrects directions so "left" in our
+                    # detection matches the user's actual left.
+                    frame = cv2.flip(frame, 1)
 
                     w, h = frame.shape[1], frame.shape[0]
                     decision = self._process_frame(frame, w, h)
@@ -307,6 +317,8 @@ class VisionSystem:
         try:
             now_ms = int(time.time() * 1000)
             detections = self._detect(frame, w, h)
+            # Track vehicles to estimate speed and direction
+            detections = self._track_vehicles(detections, now_ms)
             warnings = self._warnings_from_detections(detections, now_ms)
             surfaces = self._surface_observations(frame, w, h) if self._cfg.enable_surface_heuristic else []
             for surface in surfaces:
@@ -348,6 +360,120 @@ class VisionSystem:
                 agents_consulted=["vision_error"],
                 debug={"error": str(e)},
             )
+
+    def _track_vehicles(self, detections: List[Detection], now_ms: int) -> List[Detection]:
+        """Track vehicles across frames to estimate speed and direction."""
+        vehicle_labels = {"car", "bus", "truck", "motorcycle", "bicycle"}
+        tracked_detections = []
+        
+        # Clean up old tracks (older than 2 seconds)
+        if now_ms - self._last_track_cleanup > 2000:
+            self._last_track_cleanup = now_ms
+            cutoff = now_ms - 2000
+            self._vehicle_tracks = {
+                k: v for k, v in self._vehicle_tracks.items()
+                if v[-1]["timestamp_ms"] > cutoff
+            }
+        
+        for det in detections:
+            if det.label.lower() not in vehicle_labels:
+                tracked_detections.append(det)
+                continue
+            
+            # Simple tracking based on bounding box center
+            bbox = det.attributes.get("bbox", [0, 0, 0, 0])
+            if len(bbox) < 4:
+                tracked_detections.append(det)
+                continue
+            
+            center_x = (bbox[0] + bbox[2]) / 2
+            center_y = (bbox[1] + bbox[3]) / 2
+            
+            # Find matching track (closest center position from previous frame)
+            track_id = None
+            best_distance = 50  # pixels
+            for tid, history in self._vehicle_tracks.items():
+                last = history[-1]
+                last_center_x = last["center_x"]
+                last_center_y = last["center_y"]
+                distance = ((center_x - last_center_x)**2 + (center_y - last_center_y)**2)**0.5
+                if distance < best_distance:
+                    best_distance = distance
+                    track_id = tid
+            
+            if track_id is None:
+                # Create new track
+                track_id = f"{det.label}_{len(self._vehicle_tracks)}_{now_ms}"
+                self._vehicle_tracks[track_id] = []
+            
+            # Add to track
+            self._vehicle_tracks[track_id].append({
+                "timestamp_ms": now_ms,
+                "center_x": center_x,
+                "center_y": center_y,
+                "distance_m": det.distance_m,
+            })
+            
+            # Calculate speed and direction if we have enough history
+            history = self._vehicle_tracks[track_id]
+            if len(history) >= 2:
+                # Get positions from last 2 frames
+                prev = history[-2]
+                curr = history[-1]
+                dt = (curr["timestamp_ms"] - prev["timestamp_ms"]) / 1000.0  # seconds
+                
+                if dt > 0:
+                    # Calculate movement in pixels
+                    dx = curr["center_x"] - prev["center_x"]
+                    dy = curr["center_y"] - prev["center_y"]
+                    
+                    # Estimate speed (pixels/second, roughly m/s at typical distances)
+                    pixel_speed = ((dx**2 + dy**2)**0.5) / dt
+                    
+                    # Convert to approximate m/s (heuristic: 100 pixels ≈ 1m at 5m distance)
+                    if det.distance_m is not None:
+                        m_per_pixel = det.distance_m / (bbox[2] - bbox[0])  # rough scale
+                        speed_mps = pixel_speed * m_per_pixel * 10  # adjusted heuristic
+                    else:
+                        speed_mps = pixel_speed / 50  # fallback heuristic
+                    
+                    # Determine direction
+                    if abs(dx) > abs(dy):
+                        # Horizontal movement
+                        if dx > 0:
+                            direction = "right"
+                        else:
+                            direction = "left"
+                    else:
+                        # Vertical movement
+                        if dy > 0:
+                            direction = "down"  # getting closer/larger
+                        else:
+                            direction = "up"  # getting farther/smaller
+                    
+                    # Add motion attributes to detection
+                    motion_attrs = det.attributes.copy()
+                    motion_attrs.update({
+                        "speed_mps": round(speed_mps, 2),
+                        "movement_direction": direction,
+                        "is_moving": speed_mps > 0.5,  # threshold for "moving"
+                        "track_id": track_id,
+                    })
+                    
+                    tracked_det = Detection(
+                        label=det.label,
+                        confidence=det.confidence,
+                        distance_m=det.distance_m,
+                        direction=det.direction,
+                        attributes=motion_attrs,
+                    )
+                    tracked_detections.append(tracked_det)
+                else:
+                    tracked_detections.append(det)
+            else:
+                tracked_detections.append(det)
+        
+        return tracked_detections
 
     def _detect(self, frame: np.ndarray, w: int, h: int) -> List[Detection]:
         cfg = self._cfg
@@ -548,6 +674,36 @@ class VisionSystem:
             print(f"[vision] White object detection error: {e}")
             import traceback
             traceback.print_exc()
+        
+        # Crosswalk detection using zebra stripe patterns
+        try:
+            crosswalk = self._detect_crosswalk(frame, w, h)
+            if crosswalk is not None:
+                observations.append(crosswalk)
+        except Exception as e:
+            print(f"[vision] Crosswalk detection error: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Sidewalk boundary detection using edge density
+        try:
+            sidewalk_boundary = self._detect_sidewalk_boundary(frame, w, h)
+            if sidewalk_boundary is not None:
+                observations.append(sidewalk_boundary)
+        except Exception as e:
+            print(f"[vision] Sidewalk boundary detection error: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Sidewalk obstacle detection (poles, signs, bollards)
+        try:
+            sidewalk_obstacles = self._detect_sidewalk_obstacles(frame, w, h)
+            for obs in sidewalk_obstacles:
+                observations.append(obs)
+        except Exception as e:
+            print(f"[vision] Sidewalk obstacle detection error: {e}")
+            import traceback
+            traceback.print_exc()
 
         return observations
 
@@ -560,40 +716,98 @@ class VisionSystem:
         gray_ratio = float(np.mean(low_sat))
         bright_ratio = float(np.mean(low_sat & (val >= 105)))
         dark_ratio = float(np.mean(low_sat & (val < 105)))
-        near_field_ratio = max(bright_ratio, dark_ratio)
+        
+        # Enhanced texture analysis for road vs sidewalk distinction
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        texture_variance = np.var(gray)
+        
+        # Edge density for texture analysis
+        edges = cv2.Canny(gray, 40, 100)
+        edge_density = np.sum(edges > 0) / edges.size if edges.size > 0 else 0
+        
+        # Road: typically dark gray with moderate saturation, higher edge density (asphalt texture)
+        # Sidewalk: lighter gray with lower saturation, lower edge density (smoother concrete)
+        
+        # Road indicators
+        is_road = (gray_ratio > 0.4 and dark_ratio > 0.3 and edge_density > 0.08 and texture_variance > 100)
+        
+        # Sidewalk indicators
+        is_sidewalk = (gray_ratio > 0.3 and bright_ratio > 0.2 and edge_density < 0.15 and 50 < texture_variance < 400)
 
-        if near_field_ratio < 0.32:
-            return None
-
-        if dark_ratio > bright_ratio * 1.25:
-            kind = SurfaceKind.ROAD
-            confidence = min(0.72, 0.38 + dark_ratio * 0.45 + gray_ratio * 0.10)
-        else:
-            kind = SurfaceKind.SIDEWALK
-            confidence = min(0.68, 0.34 + bright_ratio * 0.42 + gray_ratio * 0.10)
-
-        if confidence < 0.42:
-            return None
-
-        return SurfaceObservation(
-            kind=kind,
-            confidence=confidence,
-            direction=direction,
-            near_field_ratio=near_field_ratio,
-            distance_m=0.8 if direction == Direction.CENTER else 1.2,
-            source="vision-surface-heuristic",
-            attributes={
-                "gray_ratio": round(gray_ratio, 3),
-                "bright_gray_ratio": round(bright_ratio, 3),
-                "dark_gray_ratio": round(dark_ratio, 3),
-                "note": "color/texture heuristic; use segmentation+depth for deployment",
-            },
-        )
+        if is_road:
+            return SurfaceObservation(
+                kind=SurfaceKind.ROAD,
+                confidence=min(0.85, gray_ratio + dark_ratio + edge_density),
+                direction=direction,
+                near_field_ratio=gray_ratio,
+                distance_m=0.8 if direction == Direction.CENTER else 1.2,
+                source="vision-surface-heuristic-enhanced",
+                attributes={
+                    "gray_ratio": round(gray_ratio, 3),
+                    "bright_gray_ratio": round(bright_ratio, 3),
+                    "dark_gray_ratio": round(dark_ratio, 3),
+                    "edge_density": round(edge_density, 3),
+                    "texture_variance": round(texture_variance, 2),
+                    "note": "enhanced road detection via texture and edge analysis",
+                },
+            )
+        
+        if is_sidewalk:
+            return SurfaceObservation(
+                kind=SurfaceKind.SIDEWALK,
+                confidence=min(0.85, gray_ratio + bright_ratio + (1.0 - edge_density)),
+                direction=direction,
+                near_field_ratio=gray_ratio,
+                distance_m=2.0 if direction == Direction.CENTER else 2.5,
+                source="vision-surface-heuristic-enhanced",
+                attributes={
+                    "gray_ratio": round(gray_ratio, 3),
+                    "bright_gray_ratio": round(bright_ratio, 3),
+                    "dark_gray_ratio": round(dark_ratio, 3),
+                    "edge_density": round(edge_density, 3),
+                    "texture_variance": round(texture_variance, 2),
+                    "note": "enhanced sidewalk detection via texture and edge analysis",
+                },
+            )
+        
+        # Fallback to original logic for backward compatibility
+        if gray_ratio > 0.4 and dark_ratio > 0.3:
+            return SurfaceObservation(
+                kind=SurfaceKind.ROAD,
+                confidence=min(0.75, gray_ratio + dark_ratio),
+                direction=direction,
+                near_field_ratio=gray_ratio,
+                distance_m=0.8 if direction == Direction.CENTER else 1.2,
+                source="vision-surface-heuristic",
+                attributes={
+                    "gray_ratio": round(gray_ratio, 3),
+                    "bright_gray_ratio": round(bright_ratio, 3),
+                    "dark_gray_ratio": round(dark_ratio, 3),
+                    "note": "color/texture heuristic; use segmentation+depth for deployment",
+                },
+            )
+        
+        # Fallback sidewalk: bright gray surface that didn't match enhanced thresholds
+        if gray_ratio > 0.3 and bright_ratio > 0.2:
+            return SurfaceObservation(
+                kind=SurfaceKind.SIDEWALK,
+                confidence=min(0.70, gray_ratio + bright_ratio),
+                direction=direction,
+                near_field_ratio=gray_ratio,
+                distance_m=2.0 if direction == Direction.CENTER else 2.5,
+                source="vision-surface-heuristic",
+                attributes={
+                    "gray_ratio": round(gray_ratio, 3),
+                    "bright_gray_ratio": round(bright_ratio, 3),
+                    "dark_gray_ratio": round(dark_ratio, 3),
+                    "note": "color/texture heuristic; use segmentation+depth for deployment",
+                },
+            )
 
     def _detect_edge_density_obstacles(self, frame: np.ndarray, w: int, h: int) -> List[SurfaceObservation]:
-        """Detect unknown obstacles via edge density in center and side regions.
-
-        Catches walls, pillars, boxes, and other obstacles that YOLO might miss
+        """Detect unknown obstacles via edge density in left/center/right bands.
+        
+        Catches obstacles that YOLO might miss entirely (walls, pillars, boxes)
         due to being partially visible at the frame edge or not in its training
         classes.
         """
@@ -728,8 +942,16 @@ class VisionSystem:
         context, but they are less actionable than "handle at 2 o'clock; reach
         right hand; press the lever down."
         """
-        handle = self._detect_door_handle(frame, w, h)
         frame_context = self._detect_door_frame_context(frame, w, h)
+        handle = self._detect_door_handle(frame, w, h)
+
+        if handle is not None:
+            handle_conf = float(handle["confidence"])
+            # Low-confidence handles require door frame context to avoid
+            # false positives.  High-confidence handles (≥0.75) are trusted
+            # on their own since the edge/color/geometry criteria are strong.
+            if handle_conf < 0.75 and frame_context is None:
+                handle = None   # discard likely false positive
 
         if handle is not None:
             confidence = float(handle["confidence"])
@@ -800,8 +1022,7 @@ class VisionSystem:
             maxLineGap=14,
         )
         if lines is None:
-            horizontal = self._detect_horizontal_lever_handle(frame, w, h, crop, x_start, y_start)
-            return horizontal or self._detect_vertical_pull_handle(frame, w, h, crop, x_start, y_start)
+            return None
 
         global_lines = []
         for raw in lines[:, 0]:
@@ -837,7 +1058,7 @@ class VisionSystem:
             length_score = min(1.0, length / max(1.0, w * 0.14))
             mid_height_bonus = 0.10 if 0.45 <= y_ratio <= 0.82 else 0.0
             score = 0.22 + length_score * 0.26 + color_score * 0.24 + support_score * 0.24 + mid_height_bonus
-            if score < 0.52:
+            if score < 0.68:
                 continue
 
             x_min = max(0, int(min(lx1, lx2) - w * 0.025))
@@ -861,12 +1082,7 @@ class VisionSystem:
                 best = handle
                 best_score = score
 
-        if best is not None:
-            return best
-        horizontal = self._detect_horizontal_lever_handle(frame, w, h, crop, x_start, y_start)
-        if horizontal is not None:
-            return horizontal
-        return self._detect_vertical_pull_handle(frame, w, h, crop, x_start, y_start)
+        return best
 
     def _detect_horizontal_lever_handle(
         self,
@@ -1269,6 +1485,276 @@ class VisionSystem:
             },
         )
 
+    def _detect_crosswalk(self, frame: np.ndarray, w: int, h: int) -> Optional[SurfaceObservation]:
+        """Detect crosswalk zebra stripe patterns for pedestrian crossing guidance.
+        
+        Crosswalks have alternating white/dark stripes perpendicular to the walking direction.
+        """
+        # Focus on center-bottom region where crosswalks appear
+        y0 = self._cfg.surface_y_start
+        y1 = 0.95
+        x0, x1 = 0.20, 0.80  # Center 60% horizontally
+        
+        y_start = int(h * y0)
+        y_end = int(h * y1)
+        x_start = int(w * x0)
+        x_end = int(w * x1)
+        
+        if y_end - y_start < 32 or x_end - x_start < 32:
+            return None
+            
+        crop = frame[y_start:y_end, x_start:x_end]
+        if crop.size == 0:
+            return None
+        
+        # Convert to grayscale
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        
+        # Detect horizontal lines (zebra stripes are horizontal)
+        edges = cv2.Canny(gray, 50, 150)
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi / 180,
+            threshold=max(15, crop.shape[1] // 10),
+            minLineLength=max(30, crop.shape[1] // 4),
+            maxLineGap=15,
+        )
+        
+        if lines is None or len(lines) < 3:
+            return None
+        
+        # Filter for horizontal lines (zebra stripes)
+        horizontal_lines = []
+        for line in lines[:, 0]:
+            x1, y1, x2, y2 = line
+            dx = abs(x2 - x1)
+            dy = abs(y2 - y1)
+            if dy < 3:  # Nearly horizontal
+                horizontal_lines.append(line)
+        
+        # Need multiple horizontal lines to be a crosswalk
+        if len(horizontal_lines) < 3:
+            return None
+        
+        # Check for alternating pattern (zebra stripes)
+        # Group lines by y-position
+        line_y_positions = sorted([l[1] for l in horizontal_lines])
+        
+        # Check if lines are roughly evenly spaced
+        if len(line_y_positions) >= 3:
+            gaps = [line_y_positions[i+1] - line_y_positions[i] for i in range(len(line_y_positions)-1)]
+            avg_gap = np.mean(gaps) if gaps else 0
+            gap_variance = np.var(gaps) if gaps else 0
+            # Crosswalk stripes should have relatively even spacing
+            if gap_variance > (avg_gap * 2) ** 2:
+                return None
+        
+        # Estimate distance based on vertical position
+        y_center = (y_start + y_end) / 2 / h
+        if y_center > 0.85:
+            estimated_distance = 1.0
+        elif y_center > 0.75:
+            estimated_distance = 2.0
+        else:
+            estimated_distance = 3.5
+        
+        # Confidence based on number of horizontal lines
+        confidence = min(0.85, 0.4 + len(horizontal_lines) * 0.05)
+        
+        return SurfaceObservation(
+            kind=SurfaceKind.CROSSWALK,
+            confidence=confidence,
+            direction=Direction.CENTER,
+            near_field_ratio=len(horizontal_lines) / max(1, len(lines)),
+            distance_m=estimated_distance,
+            source="vision-crosswalk-detection",
+            attributes={
+                "horizontal_lines": len(horizontal_lines),
+                "line_spacing_avg": round(np.mean(gaps) if gaps else 0, 1),
+                "note": "zebra stripe pattern detected",
+            },
+        )
+
+    def _detect_sidewalk_boundary(self, frame: np.ndarray, w: int, h: int) -> Optional[SurfaceObservation]:
+        """Detect sidewalk boundaries using edge density and texture analysis.
+        
+        Sidewalks typically have:
+        - Clear boundary edges (curb or grass)
+        - More uniform texture than roads
+        - Less visual noise than asphalt
+        """
+        # Analyze left, center, and right regions for sidewalk boundaries
+        directions = [
+            (Direction.LEFT, 0.0, 0.35),
+            (Direction.CENTER, 0.35, 0.65),
+            (Direction.RIGHT, 0.65, 1.0),
+        ]
+        
+        best_boundary = None
+        best_confidence = 0.0
+        
+        for direction, x_start_ratio, x_end_ratio in directions:
+            y0 = self._cfg.surface_y_start
+            y1 = 0.95
+            
+            y_start = int(h * y0)
+            y_end = int(h * y1)
+            x_start = int(w * x_start_ratio)
+            x_end = int(w * x_end_ratio)
+            
+            if y_end - y_start < 32 or x_end - x_start < 32:
+                continue
+                
+            crop = frame[y_start:y_end, x_start:x_end]
+            if crop.size == 0:
+                continue
+            
+            # Convert to grayscale for edge detection
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            
+            # Edge density analysis
+            edges = cv2.Canny(gray, 40, 100)
+            edge_pixels = np.sum(edges > 0)
+            total_pixels = edges.shape[0] * edges.shape[1]
+            edge_density = edge_pixels / total_pixels if total_pixels > 0 else 0
+            
+            # Texture uniformity (variance in grayscale)
+            texture_variance = np.var(gray)
+            
+            # Sidewalks have moderate edge density (not too smooth like road, not too noisy like grass)
+            # and moderate texture variance
+            sidewalk_edge_density = (0.05 <= edge_density <= 0.20)
+            sidewalk_texture = (50 <= texture_variance <= 500)
+            
+            if sidewalk_edge_density and sidewalk_texture:
+                confidence = min(0.80, edge_density * 3 + (texture_variance / 1000))
+                
+                if confidence > best_confidence:
+                    best_confidence = confidence
+                    best_boundary = SurfaceObservation(
+                        kind=SurfaceKind.SIDEWALK,
+                        confidence=confidence,
+                        direction=direction,
+                        near_field_ratio=edge_density,
+                        distance_m=2.0,  # Sidewalk typically extends ahead
+                        source="vision-sidewalk-boundary",
+                        attributes={
+                            "edge_density": round(edge_density, 3),
+                            "texture_variance": round(texture_variance, 2),
+                            "note": "sidewalk detected via boundary and texture analysis",
+                        },
+                    )
+        
+        return best_boundary
+
+    def _detect_sidewalk_obstacles(self, frame: np.ndarray, w: int, h: int) -> List[SurfaceObservation]:
+        """Detect sidewalk obstacles like poles, signs, and bollards.
+        
+        These obstacles are typically:
+        - Vertical thin objects (poles, bollards)
+        - Rectangular shapes (signs)
+        - Located along sidewalk edges
+        - Have distinctive edge patterns
+        """
+        observations = []
+        
+        # Analyze left, center, and right regions
+        regions = [
+            (Direction.LEFT, 0.0, 0.35),
+            (Direction.CENTER, 0.35, 0.65),
+            (Direction.RIGHT, 0.65, 1.0),
+        ]
+        
+        for direction, x_start_ratio, x_end_ratio in regions:
+            y0 = self._cfg.surface_y_start
+            y1 = 0.95
+            
+            y_start = int(h * y0)
+            y_end = int(h * y1)
+            x_start = int(w * x_start_ratio)
+            x_end = int(w * x_end_ratio)
+            
+            if y_end - y_start < 32 or x_end - x_start < 32:
+                continue
+                
+            crop = frame[y_start:y_end, x_start:x_end]
+            if crop.size == 0:
+                continue
+            
+            # Convert to grayscale for edge detection
+            gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+            
+            # Detect vertical edges (poles, bollards)
+            edges = cv2.Canny(gray, 50, 150)
+            lines = cv2.HoughLinesP(
+                edges,
+                rho=1,
+                theta=np.pi / 180,
+                threshold=max(10, crop.shape[1] // 12),
+                minLineLength=max(20, crop.shape[0] // 3),
+                maxLineGap=10,
+            )
+            
+            if lines is None or len(lines) < 2:
+                continue
+            
+            # Count vertical vs horizontal lines
+            vertical_count = 0
+            horizontal_count = 0
+            for line in lines[:, 0]:
+                x1, y1, x2, y2 = line
+                dx = abs(x2 - x1)
+                dy = abs(y2 - y1)
+                if dx < 3:  # Nearly vertical
+                    vertical_count += 1
+                elif dy < 3:  # Nearly horizontal
+                    horizontal_count += 1
+            
+            # Poles/bollards: strong vertical dominance
+            is_pole = vertical_count >= 3 and vertical_count > horizontal_count * 2
+            
+            # Signs: rectangular shape with mixed edges
+            is_sign = (vertical_count >= 2 and horizontal_count >= 2 and 
+                      abs(vertical_count - horizontal_count) <= 2)
+            
+            if is_pole or is_sign:
+                # Estimate distance based on vertical position
+                y_center = (y_start + y_end) / 2 / h
+                if y_center > 0.85:
+                    estimated_distance = 0.8
+                elif y_center > 0.75:
+                    estimated_distance = 1.5
+                else:
+                    estimated_distance = 2.5
+                
+                # Determine obstacle type
+                if is_pole:
+                    obstacle_type = "pole or bollard"
+                    confidence = min(0.80, 0.5 + vertical_count * 0.05)
+                else:
+                    obstacle_type = "sign"
+                    confidence = min(0.75, 0.4 + (vertical_count + horizontal_count) * 0.03)
+                
+                observations.append(SurfaceObservation(
+                    kind=SurfaceKind.OBSTACLE_EDGE,  # Reuse obstacle edge type
+                    confidence=confidence,
+                    direction=direction,
+                    near_field_ratio=vertical_count / max(1, len(lines)),
+                    distance_m=estimated_distance,
+                    source="vision-sidewalk-obstacle",
+                    attributes={
+                        "obstacle_type": obstacle_type,
+                        "vertical_lines": vertical_count,
+                        "horizontal_lines": horizontal_count,
+                        "is_pole": is_pole,
+                        "is_sign": is_sign,
+                        "note": f"{obstacle_type} detected via edge pattern analysis",
+                    },
+                ))
+        
+        return observations
+
     def _estimate_curb_edge(self, frame: np.ndarray, w: int, h: int) -> Optional[SurfaceObservation]:
         curb_y0, curb_y1 = self._cfg.curb_y_range
         y1 = int(h * curb_y0)
@@ -1316,14 +1802,39 @@ class VisionSystem:
             return None
         y_ratio = best_y / max(1.0, crop.shape[0])
         distance_m = 0.6 + y_ratio * 1.2
+        
+        # Estimate curb height based on vertical position and edge characteristics
+        # Lower in frame = closer = taller curb appears
+        if y_ratio > 0.7:
+            estimated_height_cm = 15  # Standard curb ~15cm
+        elif y_ratio > 0.5:
+            estimated_height_cm = 10  # Lower curb or ramp
+        else:
+            estimated_height_cm = 5  # Very low, possibly a ramp
+        
+        # Detect ramps by checking for gradual slope instead of sharp edge
+        # Ramps have more gradual transitions in the edge profile
+        is_ramp = False
+        if length_ratio > 0.5 and y_ratio < 0.6:
+            # Check if edge is more gradual (ramp-like)
+            # Ramps typically have longer, less distinct edges
+            is_ramp = True
+            estimated_height_cm = 5  # Ramps are low
+        
         return SurfaceObservation(
             kind=SurfaceKind.CURB,
-            confidence=min(0.78, 0.40 + length_ratio * 0.40),
+            confidence=min(0.85, 0.40 + length_ratio * 0.40),
             direction=Direction.CENTER,
             near_field_ratio=min(1.0, length_ratio),
             distance_m=distance_m,
-            source="vision-curb-edge-heuristic",
-            attributes={"horizontal_edge_ratio": round(length_ratio, 3), "edge_y_ratio": round(y_ratio, 3)},
+            source="vision-curb-edge-enhanced",
+            attributes={
+                "horizontal_edge_ratio": round(length_ratio, 3),
+                "edge_y_ratio": round(y_ratio, 3),
+                "estimated_height_cm": estimated_height_cm,
+                "is_ramp": is_ramp,
+                "note": "curb with height estimation and ramp detection",
+            },
         )
 
     @staticmethod
