@@ -1,0 +1,198 @@
+{
+  "nodes": [
+    {
+      "id": "entrance",
+      "name": "Main Entrance",
+      "floor": 1,
+      "type": "entrance",
+      "x": 0,
+      "y": 0,
+      "tags": ["entrance", "accessible"]
+    },
+    {
+      "id": "lobby",
+      "name": "Lobby",
+      "floor": 1,
+      "type": "landmark",
+      "x": 10,
+      "y": 0,
+      "tags": ["waiting_area"]
+    },
+    {
+      "id": "junction1",
+      "name": "Main Hall Junction",
+      "floor": 1,
+      "type": "junction",
+      "x": 20,
+      "y": 0,
+      "tags": []
+    },
+    {
+      "id": "elevator",
+      "name": "Elevator",
+      "floor": 1,
+      "type": "elevator",
+      "x": 20,
+      "y": 10,
+      "tags": ["accessible"]
+    },
+    {
+      "id": "stairs",
+      "name": "Stairs",
+      "floor": 1,
+      "type": "stairs",
+      "x": 25,
+      "y": 0,
+      "tags": []
+    },
+    {
+      "id": "restroom",
+      "name": "Restroom",
+      "floor": 1,
+      "type": "room",
+      "x": 30,
+      "y": 0,
+      "tags": ["restroom", "accessible"]
+    },
+    {
+      "id": "cafe",
+      "name": "Cafeteria",
+      "floor": 1,
+      "type": "room",
+      "x": 40,
+      "y": 0,
+      "tags": ["food", "accessible"]
+    },
+    {
+      "id": "office1",
+      "name": "Office 101",
+      "floor": 1,
+      "type": "room",
+      "x": 50,
+      "y": 0,
+      "tags": ["office"]
+    },
+    {
+      "id": "elevator2",
+      "name": "Elevator",
+      "floor": 2,
+      "type": "elevator",
+      "x": 20,
+      "y": 10,
+      "tags": ["accessible"]
+    },
+    {
+      "id": "hallway2",
+      "name": "Second Floor Hallway",
+      "floor": 2,
+      "type": "junction",
+      "x": 20,
+      "y": 0,
+      "tags": []
+    },
+    {
+      "id": "meeting_room",
+      "name": "Meeting Room A",
+      "floor": 2,
+      "type": "room",
+      "x": 30,
+      "y": 0,
+      "tags": ["meeting", "accessible"]
+    },
+    {
+      "id": "office2",
+      "name": "Office 201",
+      "floor": 2,
+      "type": "room",
+      "x": 40,
+      "y": 0,
+      "tags": ["office"]
+    }
+  ],
+  "edges": [
+    {
+      "from": "entrance",
+      "to": "lobby",
+      "distance": 10,
+      "type": "corridor",
+      "accessible": true
+    },
+    {
+      "from": "lobby",
+      "to": "junction1",
+      "distance": 10,
+      "type": "corridor",
+      "accessible": true
+    },
+    {
+      "from": "junction1",
+      "to": "elevator",
+      "distance": 10,
+      "type": "corridor",
+      "accessible": true
+    },
+    {
+      "from": "junction1",
+      "to": "stairs",
+      "distance": 5,
+      "type": "corridor",
+      "accessible": true
+    },
+    {
+      "from": "junction1",
+      "to": "restroom",
+      "distance": 10,
+      "type": "corridor",
+      "accessible": true
+    },
+    {
+      "from": "restroom",
+      "to": "cafe",
+      "distance": 10,
+      "type": "corridor",
+      "accessible": true
+    },
+    {
+      "from": "cafe",
+      "to": "office1",
+      "distance": 10,
+      "type": "corridor",
+      "accessible": true
+    },
+    {
+      "from": "elevator",
+      "to": "elevator2",
+      "distance": 5,
+      "type": "elevator",
+      "accessible": true
+    },
+    {
+      "from": "stairs",
+      "to": "hallway2",
+      "distance": 8,
+      "type": "stairs",
+      "accessible": true
+    },
+    {
+      "from": "elevator2",
+      "to": "hallway2",
+      "distance": 10,
+      "type": "corridor",
+      "accessible": true
+    },
+    {
+      "from": "hallway2",
+      "to": "meeting_room",
+      "distance": 10,
+      "type": "corridor",
+      "accessible": true
+    },
+    {
+      "from": "meeting_room",
+      "to": "office2",
+      "distance": 10,
+      "type": "corridor",
+      "accessible": true
+    }
+  ]
+}

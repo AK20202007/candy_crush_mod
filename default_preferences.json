@@ -1,0 +1,67 @@
+{
+  "description": "Default user preferences for assistive navigation system",
+  "verbosity": "normal",
+  "speech_rate": 1.0,
+  "warning_sensitivity": "normal",
+  "haptic_enabled": true,
+  "audio_cues_enabled": true,
+  "auto_repeat_warnings": true,
+  "navigation_prompt_interval_s": 8.0,
+  "indoor_mode": false,
+  "outdoor_mode": false,
+  "crossing_mode": false,
+  
+  "speech_timing": {
+    "critical": {
+      "initial_delay_ms": 0,
+      "min_repeat_interval_ms": 1500,
+      "max_repeats": 5,
+      "cooldown_after_max_ms": 5000
+    },
+    "warning": {
+      "initial_delay_ms": 500,
+      "min_repeat_interval_ms": 3000,
+      "max_repeats": 3,
+      "cooldown_after_max_ms": 8000
+    },
+    "guidance": {
+      "initial_delay_ms": 0,
+      "min_repeat_interval_ms": 8000,
+      "max_repeats": 2,
+      "cooldown_after_max_ms": 15000
+    },
+    "info": {
+      "initial_delay_ms": 0,
+      "min_repeat_interval_ms": 15000,
+      "max_repeats": 1,
+      "cooldown_after_max_ms": 30000
+    }
+  },
+  
+  "detection": {
+    "tracked_classes": [
+      "bench", "bicycle", "bus", "car", "chair",
+      "motorcycle", "person", "stop sign", "traffic light", "truck"
+    ],
+    "confidence_threshold": 0.35,
+    "confirm_frames": 2
+  },
+  
+  "user_profiles": {
+    "beginner": {
+      "verbosity": "verbose",
+      "warning_sensitivity": "high",
+      "navigation_prompt_interval_s": 5.0
+    },
+    "experienced": {
+      "verbosity": "normal",
+      "warning_sensitivity": "normal",
+      "navigation_prompt_interval_s": 10.0
+    },
+    "expert": {
+      "verbosity": "minimal",
+      "warning_sensitivity": "low",
+      "navigation_prompt_interval_s": 15.0
+    }
+  }
+}
