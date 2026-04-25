@@ -95,7 +95,11 @@ def test_door_handle_detector_finds_horizontal_lever() -> None:
 
     vision = object.__new__(VisionSystem)
     vision._cfg = VisionConfig(camera_mount="hand")
+    vision._consec_door_hits = 0
 
+    # Consecutive-frame gate requires 3 detections before reporting.
+    for _ in range(2):
+        vision._detect_door(frame, 640, 480)
     obs = vision._detect_door(frame, 640, 480)
 
     assert obs is not None

@@ -82,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--camera-mount", type=str, default="hand", choices=["head", "hand"], help="Camera mount position: 'head' for glasses/head-mounted, 'hand' for phone (default: hand).")
     parser.add_argument("--origin", type=str, default=None, help='Walking start as "longitude,latitude" for ORS routing.')
     parser.add_argument("--destination", type=str, default=None, help="Destination text for non-interactive runs; skips voice capture.")
-    parser.add_argument("--typed-destination", action="store_true", help="Use the old terminal destination prompt instead of voice capture.")
+    parser.add_argument("--voice-destination", action="store_true", help="Use voice capture for destination instead of terminal input.")
     parser.add_argument("--indoor-layout", type=str, default=None, help="Path to indoor layout JSON file for indoor routing.")
     parser.add_argument("--indoor-start-node", type=str, default="entrance", help="Starting node ID for indoor routing (default: entrance).")
     parser.add_argument("--voice-timeout-s", type=float, default=8.0, help="Seconds to listen for spoken destination.")
@@ -149,37 +149,37 @@ def _get_destination(args: argparse.Namespace, speech: SpeechController) -> str:
     if args.destination:
         destination = args.destination.strip()
         print(f"[main] Destination from --destination: {destination}")
+        speech.speak_urgent(f"Destination confirmed: {destination}.")
         return destination
 
-    if args.typed_destination:
-        destination = input("Enter destination (place name or address; mock text if not using maps): ").strip()
-        if destination:
+    if getattr(args, "voice_destination", False):
+        print("[main] Listening for destination. Speak after the prompt.")
+        try:
+            voice_config = DestinationCaptureConfig(
+                timeout_s=args.voice_timeout_s,
+                locale=args.voice_locale,
+                prefer_on_device=not args.allow_network_speech,
+                attempts=args.voice_attempts,
+                codeword=args.codeword,
+                stop_word=args.stop_word,
+            )
+            if args.no_codeword:
+                destination = capture_destination_by_voice(speak=speech.speak_normal, config=voice_config)
+            else:
+                destination = capture_destination_with_codeword(speak=speech.speak_normal, config=voice_config)
+            print(f"[main] Heard destination: {destination}")
+            speech.speak_urgent(f"Destination confirmed: {destination}.")
             return destination
+        except VoiceInputError as exc:
+            print(f"[main] Voice destination capture failed ({exc}); falling back to terminal input.")
+
+    # Default: terminal input
+    destination = input("Enter destination: ").strip()
+    if not destination:
         destination = "the lobby"
         print(f"[main] No destination entered; using default: {destination}")
-        return destination
-
-    print("[main] Listening for destination. Speak after the prompt.")
-    try:
-        voice_config = DestinationCaptureConfig(
-            timeout_s=args.voice_timeout_s,
-            locale=args.voice_locale,
-            prefer_on_device=not args.allow_network_speech,
-            attempts=args.voice_attempts,
-            codeword=args.codeword,
-            stop_word=args.stop_word,
-        )
-        if args.no_codeword:
-            destination = capture_destination_by_voice(speak=speech.speak_normal, config=voice_config)
-        else:
-            destination = capture_destination_with_codeword(speak=speech.speak_normal, config=voice_config)
-        print(f"[main] Heard destination: {destination}")
-        return destination
-    except VoiceInputError as exc:
-        destination = "the lobby"
-        print(f"[main] Voice destination capture failed ({exc}); using default: {destination}")
-        speech.speak_normal(f"I could not hear a destination. Using {destination}.")
-        return destination
+    speech.speak_urgent(f"Destination confirmed: {destination}.")
+    return destination
 
 
 def main() -> None:

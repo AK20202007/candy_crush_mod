@@ -227,6 +227,7 @@ class VisionSystem:
             self._class_ids = sorted(self._name_to_id[n] for n in self._active_classes)
 
         self._consec_warning_hits: Dict[str, int] = {}
+        self._consec_door_hits: int = 0
         self._last_spoken: Optional[str] = None
         
         # Vehicle tracking for speed and direction estimation
@@ -901,7 +902,8 @@ class VisionSystem:
             return None
 
         # Vertical lines should dominate for obstacles (walls, pillars)
-        if vertical_count <= max(2, horizontal_count):
+        # Allow walls with fewer distinct edges by using ratio instead of absolute count
+        if vertical_count <= horizontal_count * 1.5:
             return None
 
         # Estimate distance based on vertical position in frame
@@ -948,10 +950,21 @@ class VisionSystem:
         if handle is not None:
             handle_conf = float(handle["confidence"])
             # Low-confidence handles require door frame context to avoid
-            # false positives.  High-confidence handles (≥0.75) are trusted
+            # false positives.  High-confidence handles (≥0.85) are trusted
             # on their own since the edge/color/geometry criteria are strong.
-            if handle_conf < 0.75 and frame_context is None:
+            if handle_conf < 0.85 and frame_context is None:
                 handle = None   # discard likely false positive
+
+        # Consecutive-frame gate: require 3 consecutive detections to suppress
+        # single-frame hallucinations (random edges scored as handles).
+        if handle is not None or frame_context is not None:
+            self._consec_door_hits += 1
+        else:
+            self._consec_door_hits = 0
+            return None
+
+        if self._consec_door_hits < 3:
+            return None
 
         if handle is not None:
             confidence = float(handle["confidence"])
@@ -1058,7 +1071,7 @@ class VisionSystem:
             length_score = min(1.0, length / max(1.0, w * 0.14))
             mid_height_bonus = 0.10 if 0.45 <= y_ratio <= 0.82 else 0.0
             score = 0.22 + length_score * 0.26 + color_score * 0.24 + support_score * 0.24 + mid_height_bonus
-            if score < 0.68:
+            if score < 0.78:
                 continue
 
             x_min = max(0, int(min(lx1, lx2) - w * 0.025))
@@ -1714,11 +1727,11 @@ class VisionSystem:
             # Poles/bollards: strong vertical dominance
             is_pole = vertical_count >= 3 and vertical_count > horizontal_count * 2
             
-            # Signs: rectangular shape with mixed edges
-            is_sign = (vertical_count >= 2 and horizontal_count >= 2 and 
-                      abs(vertical_count - horizontal_count) <= 2)
+            # Sign detection disabled — the mixed-edge heuristic produces too
+            # many false positives (bookshelves, window frames, table edges).
+            # YOLO already detects stop signs and traffic lights reliably.
             
-            if is_pole or is_sign:
+            if is_pole:
                 # Estimate distance based on vertical position
                 y_center = (y_start + y_end) / 2 / h
                 if y_center > 0.85:
@@ -1728,13 +1741,8 @@ class VisionSystem:
                 else:
                     estimated_distance = 2.5
                 
-                # Determine obstacle type
-                if is_pole:
-                    obstacle_type = "pole or bollard"
-                    confidence = min(0.80, 0.5 + vertical_count * 0.05)
-                else:
-                    obstacle_type = "sign"
-                    confidence = min(0.75, 0.4 + (vertical_count + horizontal_count) * 0.03)
+                obstacle_type = "pole or bollard"
+                confidence = min(0.80, 0.5 + vertical_count * 0.05)
                 
                 observations.append(SurfaceObservation(
                     kind=SurfaceKind.OBSTACLE_EDGE,  # Reuse obstacle edge type
@@ -1748,7 +1756,6 @@ class VisionSystem:
                         "vertical_lines": vertical_count,
                         "horizontal_lines": horizontal_count,
                         "is_pole": is_pole,
-                        "is_sign": is_sign,
                         "note": f"{obstacle_type} detected via edge pattern analysis",
                     },
                 ))

@@ -139,16 +139,28 @@ def _direction_phrase(direction: Direction) -> str:
     }[direction]
 
 
-def _avoidance_phrase(direction: Direction) -> str:
+def _avoidance_phrase(direction: Direction, distance_m: Optional[float] = None) -> str:
     """Return a phrase telling the user which way to move to avoid the obstacle."""
-    return {
-        Direction.LEFT: "Move right.",
-        Direction.SLIGHT_LEFT: "Move right.",
-        Direction.CENTER: "Move left or right.",
-        Direction.SLIGHT_RIGHT: "Move left.",
-        Direction.RIGHT: "Move left.",
-        Direction.UNKNOWN: "Move left or right.",
+    base_phrase = {
+        Direction.LEFT: "Move right",
+        Direction.SLIGHT_LEFT: "Move right",
+        Direction.CENTER: "Move left or right",
+        Direction.SLIGHT_RIGHT: "Move left",
+        Direction.RIGHT: "Move left",
+        Direction.UNKNOWN: "Move left or right",
     }[direction]
+    
+    if distance_m is not None and distance_m > 0:
+        # Approximate steps (1 step ≈ 0.75m)
+        steps = max(1, int(round(distance_m / 0.75)))
+        if steps == 1:
+            return f"{base_phrase} about one step."
+        elif steps <= 3:
+            return f"{base_phrase} about {steps} steps."
+        else:
+            return f"{base_phrase} about {steps} steps."
+    
+    return base_phrase + "."
 
 
 def _haptic_for_direction(direction: Direction, urgent: bool = False) -> HapticPattern:
@@ -191,7 +203,7 @@ class SafetyAgent(BaseAgent):
             )[0]
             if self.policy.warning_confidence_ok(high.severity, high.confidence) and (ctx.motion.is_moving or high.is_immediate()):
                 prefix = "Stop." if high.is_immediate() or high.severity == "critical" else "Caution."
-                avoidance = _avoidance_phrase(high.direction) if high.direction else ""
+                avoidance = _avoidance_phrase(high.direction, high.distance_m) if high.direction else ""
                 return AgentDecision(
                     action=AgentAction.WARN,
                     priority=100 if high.is_immediate() else 85,
@@ -228,7 +240,7 @@ class SafetyAgent(BaseAgent):
                 or _partial_edge_requires_stop(det)
             )
             subject = f"partially visible {det.label}" if partial_edge else det.label
-            avoidance = _avoidance_phrase(det.direction)
+            avoidance = _avoidance_phrase(det.direction, det.distance_m)
             # Omit distance for immediate obstacles (≤1.0m) for brevity
             distance_str = "" if (det.distance_m is not None and det.distance_m <= 1.0) else f", {_detection_distance_phrase(det)}"
             return AgentDecision(
@@ -284,7 +296,7 @@ class SafetyAgent(BaseAgent):
                 det = sorted(immediate, key=lambda d: d.distance_m if d.distance_m is not None else 99)[0]
                 partial_edge = _is_partial_edge_detection(det)
                 subject = f"partially visible {det.label}" if partial_edge else det.label
-                avoidance = _avoidance_phrase(det.direction)
+                avoidance = _avoidance_phrase(det.direction, det.distance_m)
                 # Omit distance for immediate obstacles (≤1.0m) for brevity
                 distance_str = "" if (det.distance_m is not None and det.distance_m <= 1.0) else f", {_detection_distance_phrase(det)}"
                 return AgentDecision(
@@ -308,7 +320,7 @@ class SafetyAgent(BaseAgent):
                     # Only trigger if confident and close enough
                     if surface.confidence >= 0.5 and surface.distance_m is not None and surface.distance_m <= 1.2:
                         priority = 95 if surface.distance_m <= 0.8 else 85
-                        avoidance = _avoidance_phrase(surface.direction)
+                        avoidance = _avoidance_phrase(surface.direction, surface.distance_m)
                         # Omit distance for immediate obstacles (≤1.0m) for brevity
                         distance_str = "" if surface.distance_m <= 1.0 else f" {_distance_phrase(surface.distance_m)}"
                         message = (
@@ -537,7 +549,7 @@ class TrafficAgent(BaseAgent):
         is_fast = speed_mps > 5.0
         is_close = det.distance_m is not None and det.distance_m < 5.0
 
-        avoidance = _avoidance_phrase(det.direction)
+        avoidance = _avoidance_phrase(det.direction, det.distance_m)
         if is_approaching and (is_fast or is_close):
             priority = 100  # Critical
             message = f"Stop! {det.label} approaching. {avoidance}"

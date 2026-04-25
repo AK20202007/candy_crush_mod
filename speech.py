@@ -28,7 +28,7 @@ class SpeechController:
         # Slightly faster speech keeps the demo snappy (platform-dependent).
         try:
             rate = self._engine.getProperty("rate")
-            self._engine.setProperty("rate", int(rate * 1.1))
+            self._engine.setProperty("rate", int(rate * 1.35))
         except Exception:
             pass
 
