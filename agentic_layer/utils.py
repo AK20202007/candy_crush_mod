@@ -27,6 +27,30 @@ def bbox_area_ratio(bbox: BBox, frame_width: float, frame_height: float) -> floa
     return (bbox.width * bbox.height) / area
 
 
+def bbox_edge_contact(bbox: BBox, frame_width: float, frame_height: float, margin_ratio: float = 0.02) -> list[str]:
+    """Return frame edges touched by a detection box.
+
+    Boxes at the image boundary are often partial objects. Their measured size is
+    incomplete, so downstream distance and collision logic should treat them with
+    lower confidence and more caution.
+    """
+    if frame_width <= 0 or frame_height <= 0:
+        return []
+
+    x_margin = max(2.0, frame_width * margin_ratio)
+    y_margin = max(2.0, frame_height * margin_ratio)
+    edges = []
+    if bbox.x1 <= x_margin:
+        edges.append("left")
+    if bbox.x2 >= frame_width - x_margin:
+        edges.append("right")
+    if bbox.y1 <= y_margin:
+        edges.append("top")
+    if bbox.y2 >= frame_height - y_margin:
+        edges.append("bottom")
+    return edges
+
+
 def distance_inches_to_meters(distance_inches: Optional[float]) -> Optional[float]:
     if distance_inches is None:
         return None
@@ -60,6 +84,8 @@ def detection_from_bbox(
 ) -> Detection:
     bbox = BBox(x1=x1, y1=y1, x2=x2, y2=y2)
     distance_inches = estimate_distance_inches_from_bbox(bbox, distance_scale=distance_scale)
+    edge_contact = bbox_edge_contact(bbox, frame_width, frame_height)
+    edge_truncated = bool(edge_contact)
     return Detection(
         label=label,
         confidence=confidence,
@@ -71,6 +97,11 @@ def detection_from_bbox(
             "area_ratio": bbox_area_ratio(bbox, frame_width, frame_height),
             "center_x_ratio": bbox.center_x / max(1.0, frame_width),
             "center_y_ratio": bbox.center_y / max(1.0, frame_height),
+            "bottom_y_ratio": bbox.y2 / max(1.0, frame_height),
+            "edge_contact": edge_contact,
+            "edge_truncated": edge_truncated,
+            "partial_visibility": "frame_edge" if edge_truncated else "full_bbox",
+            "distance_reliability": "low" if edge_truncated else "normal",
             "distance_inches_heuristic": distance_inches,
         },
     )

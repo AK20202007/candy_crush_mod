@@ -151,6 +151,10 @@ class NavigationApp:
                 on_decision=handle_decision,
             )
             
+            # Start hardware sensor listeners if available
+            self.vision._motion_fall_detector.start(lambda d: self.vision.handle_sensor_fall(f"DRAMATIC elevation change of {d:.1f}m", priority=99))
+            self.vision._smv_fall_detector.start(lambda s, x, y: self.vision.handle_sensor_fall(f"Impact force of {s:.1f} m/s^2", priority=10))
+            
             # Start the interface
             self.interface.start()
             
