@@ -28,18 +28,16 @@ GOOGLE_PLACES_TEXTSEARCH = "https://maps.googleapis.com/maps/api/place/textsearc
 GOOGLE_GEOCODE = "https://maps.googleapis.com/maps/api/geocode/json"
 ORS_GEOCODE = "https://api.openrouteservice.org/geocode/search"
 
-ORS_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImQ4ODJkOGM4MGViNTRkODU5NDdjYTljMjI3MTkwMDkxIiwiaCI6Im11cm11cjY0In0="
-
-
-GOOGLE_MAPS_KEY = "AIzaSyCaKUj75iDUS8tM6yxIGi5IJJMtPZqrUDo"
+# API keys loaded from environment variables (set in .env file)
+# Never hardcode keys here — they will be pushed to git
 
 
 def _get_google_key() -> Optional[str]:
-    return (os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip() or GOOGLE_MAPS_KEY
+    return (os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip() or None
 
 
-def _get_ors_key() -> str:
-    return (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip() or ORS_API_KEY
+def _get_ors_key() -> Optional[str]:
+    return (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip() or None
 
 
 def search_destination(
@@ -198,7 +196,7 @@ def get_voice_confirmation(timeout: float = 5.0) -> bool:
     Listen for a spoken 'yes' or 'no' via the microphone using ElevenLabs STT.
     Falls back to text input if voice recognition is unavailable.
     """
-    ELEVENLABS_API_KEY = "sk_b7ad54c02663e087df7e214908660e306cc0f1604ccc750c"
+    ELEVENLABS_API_KEY = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
     
     try:
         import sounddevice as sd

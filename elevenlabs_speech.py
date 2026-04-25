@@ -78,7 +78,7 @@ class ElevenLabsSpeechController:
         self.fallback_to_system = fallback_to_system
         
         # API configuration
-        self.api_key = api_key or os.getenv("ELEVENLABS_API_KEY") or "sk_b7ad54c02663e087df7e214908660e306cc0f1604ccc750c"
+        self.api_key = api_key or os.getenv("ELEVENLABS_API_KEY")
         self.voice_id = voice_id or self.DEFAULT_VOICES["default"]
         self.model_id = model_id
         
