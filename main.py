@@ -231,7 +231,10 @@ class NavigationApp:
         
         if self.interface:
             self.interface.speak_info(confirm_msg)
-            time.sleep(4)  # Let TTS finish before prompting input
+            # Wait for TTS to fully finish playing before starting microphone
+            time.sleep(8)
+            # Clear any leftover audio state
+            self.interface.speech.clear_queues()
         
         # Wait for voice confirmation
         confirmed = get_voice_confirmation()

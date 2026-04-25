@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import ssl
+import time
 import urllib.error
 import urllib.request
 from typing import Optional, Tuple
@@ -209,12 +210,19 @@ def get_voice_confirmation(timeout: float = 5.0) -> bool:
         return get_text_confirmation()
 
     try:
-        print("\n[system] Say 'yes' to confirm or 'no' to change destination...")
+        # Make sure no audio is playing before recording
+        try:
+            sd.stop()
+        except Exception:
+            pass
+        time.sleep(0.3)
         
-        # Record audio from microphone
+        print("\n[system] 🎤 Say 'yes' to confirm or 'no' to change destination...")
+        
+        # Record 3 seconds of audio (enough for "yes" or "no")
         samplerate = 16000
         recording = sd.rec(
-            int(samplerate * timeout),
+            int(samplerate * 3),
             samplerate=samplerate,
             channels=1,
             dtype=np.int16
