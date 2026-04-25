@@ -2,6 +2,7 @@
   "expo": {
     "name": "LAHacks Nav",
     "slug": "lahacks-nav",
+    "scheme": "lahacksnav",
     "version": "0.1.0",
     "orientation": "portrait",
     "platforms": [
@@ -14,35 +15,21 @@
       "infoPlist": {
         "NSLocationWhenInUseUsageDescription": "Your location is used to advance walking directions at the right time.",
         "NSCameraUsageDescription": "Camera is used for obstacle detection.",
-        "NSMicrophoneUsageDescription": "Allow LAHacks Nav to use the microphone for spoken destination input.",
-        "NSSpeechRecognitionUsageDescription": "Allow LAHacks Nav to use speech recognition for spoken destination input."
+        "NSMicrophoneUsageDescription": "The microphone listens for your spoken destination when you set up navigation.",
+        "NSSpeechRecognitionUsageDescription": "Speech recognition turns what you say into the destination address."
       }
     },
-    "plugins": [
-      [
-        "expo-build-properties",
-        {
-          "ios": {
-            "deploymentTarget": "15.1"
-          }
-        }
-      ],
-      [
-        "expo-speech-recognition",
-        {
-          "microphonePermission": "Allow LAHacks Nav to use the microphone for spoken destination input.",
-          "speechRecognitionPermission": "Allow LAHacks Nav to use speech recognition for spoken destination input."
-        }
-      ]
-    ],
     "extra": {
       "googleMapsApiKey": "AIzaSyCaKUj75iDUS8tM6yxIGi5IJJMtPZqrUDo"
     },
-    "android": {
-      "permissions": [
-        "android.permission.RECORD_AUDIO"
-      ],
-      "package": "com.lahacks.navigation"
-    }
+    "plugins": [
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow LAHacks Nav to use the microphone to hear your destination.",
+          "speechRecognitionPermission": "Allow LAHacks Nav to transcribe your spoken destination."
+        }
+      ]
+    ]
   }
 }

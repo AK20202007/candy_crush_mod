@@ -1,0 +1,12 @@
+{
+  "name": "lahacks-vision",
+  "version": "0.1.0",
+  "main": "index.js",
+  "description": "Local Expo module for on-device visual threat detection",
+  "keywords": ["expo", "ios", "vision", "camera"],
+  "license": "MIT",
+  "peerDependencies": {
+    "expo": "*",
+    "react-native": "*"
+  }
+}
