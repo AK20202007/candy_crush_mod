@@ -335,30 +335,37 @@ class VisionSystem:
 
         try:
             while stop_event is None or not stop_event.is_set():
-                ok, frame = cap.read()
-                if not ok or frame is None:
-                    print("[vision] Frame grab failed; retrying...")
-                    time.sleep(0.05)
+                try:
+                    ok, frame = cap.read()
+                    if not ok or frame is None:
+                        print("[vision] Frame grab failed; retrying...")
+                        time.sleep(0.05)
+                        continue
+
+                    h, w = frame.shape[:2]
+                    decision = self._process_frame(frame, w, h)
+                    if decision.should_speak and decision.message:
+                        self._last_spoken = decision.message
+                        self._on_decision(decision)
+
+                    fps_frames += 1
+                    elapsed = time.time() - fps_t0
+                    if elapsed >= 3.0:
+                        print(f"[vision] ~{fps_frames / elapsed:.1f} FPS over last {elapsed:.1f}s")
+                        fps_frames = 0
+                        fps_t0 = time.time()
+
+                    cv2.imshow("Assistive Nav — preview", frame)
+                    key = cv2.waitKey(1) & 0xFF
+                    if key == ord("q"):
+                        print("[vision] Quit requested from preview window.")
+                        break
+                        
+                except Exception as frame_error:
+                    print(f"[vision] Frame processing error: {frame_error}")
+                    print("[vision] Continuing after error...")
+                    time.sleep(0.1)
                     continue
-
-                h, w = frame.shape[:2]
-                decision = self._process_frame(frame, w, h)
-                if decision.should_speak and decision.message:
-                    self._last_spoken = decision.message
-                    self._on_decision(decision)
-
-                fps_frames += 1
-                elapsed = time.time() - fps_t0
-                if elapsed >= 3.0:
-                    print(f"[vision] ~{fps_frames / elapsed:.1f} FPS over last {elapsed:.1f}s")
-                    fps_frames = 0
-                    fps_t0 = time.time()
-
-                cv2.imshow("Assistive Nav — preview", frame)
-                key = cv2.waitKey(1) & 0xFF
-                if key == ord("q"):
-                    print("[vision] Quit requested from preview window.")
-                    break
         finally:
             cap.release()
             cv2.destroyAllWindows()
