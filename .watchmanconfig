@@ -1,0 +1,11 @@
+{
+  "fsevents_latency": 0.06,
+  "prefer_split_fsevents_watcher": true,
+  "ignore_dirs": [
+    "mobile/ios/Pods",
+    "mobile/ios/build",
+    "mobile/.expo",
+    "mobile/android/build",
+    "mobile/android/.gradle"
+  ]
+}
