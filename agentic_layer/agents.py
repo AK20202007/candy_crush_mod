@@ -193,7 +193,7 @@ class SafetyAgent(BaseAgent):
             subject = f"partially visible {det.label}" if partial_edge else det.label
             return AgentDecision(
                 action=AgentAction.WARN,
-                priority=95 if is_stop else 82 if partial_edge else 80,
+                priority=100 if is_stop else 82 if partial_edge else 80,
                 message=(
                     f"{'Stop' if is_stop else 'Caution'}: {subject} "
                     f"{_direction_phrase(det.direction)}, {_detection_distance_phrase(det)}."
@@ -246,7 +246,7 @@ class SafetyAgent(BaseAgent):
                 subject = f"partially visible {det.label}" if partial_edge else det.label
                 return AgentDecision(
                     action=AgentAction.WARN,
-                    priority=95,  # Always stop for immediate unknown obstacles
+                    priority=100,  # Always stop for immediate unknown obstacles
                     message=(
                         f"Stop: {subject} {_direction_phrase(det.direction)}, "
                         f"{_detection_distance_phrase(det)}."
@@ -265,7 +265,7 @@ class SafetyAgent(BaseAgent):
                 if surface.kind == SurfaceKind.OBSTACLE_EDGE:
                     # Only trigger if confident and close enough
                     if surface.confidence >= 0.5 and surface.distance_m is not None and surface.distance_m <= 1.2:
-                        priority = 95 if surface.distance_m <= 0.8 else 85
+                        priority = 100 if surface.distance_m <= 0.8 else 85
                         message = (
                             f"Stop: partially visible obstacle {_direction_phrase(surface.direction)} "
                             f"{_distance_phrase(surface.distance_m)}."
@@ -347,7 +347,7 @@ class SidewalkAgent(BaseAgent):
         if road and _surface_ahead(road) and road.confidence >= 0.50 and road.near_field_ratio >= 0.35 and ctx.motion.is_moving:
             return AgentDecision(
                 action=AgentAction.WARN,
-                priority=96,
+                priority=100,  # Obstacles/Road hazards have #1 priority
                 message=(
                     f"Stop. Road surface appears {_direction_phrase(road.direction)} in the near field. "
                     "Confirm the sidewalk edge before moving."

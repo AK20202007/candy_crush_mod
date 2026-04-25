@@ -429,6 +429,7 @@ class VisionSystem:
             cap.release()
             cv2.destroyAllWindows()
             print(f"[vision] Processed {frame_count} frames total")
+        return frame_count
 
     def _process_frame(self, frame: np.ndarray, w: int, h: int) -> AgentDecision:
         try:
@@ -832,7 +833,7 @@ class VisionSystem:
 
         # Estimate distance based on vertical position in frame
         # Lower in frame = closer
-        y_center = (y_start + y_end) / 2 / h
+        y_center = (y_start + y_end) / 2 / frame_height
         if y_center > 0.85:
             estimated_distance = 0.6  # Very close
         elif y_center > 0.75:

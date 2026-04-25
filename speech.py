@@ -96,11 +96,7 @@ class SpeechController:
             if msg == "":
                 continue
 
-            try:
-                engine.stop()
-            except Exception:
-                pass
-
-            engine.say(msg)
+            time.sleep(0.1)  # Brief pause before speaking
+            engine.say(msg + " ")
             engine.runAndWait()
-            time.sleep(0.05)
+            time.sleep(0.2)  # Wait for hardware to finish audio buffer

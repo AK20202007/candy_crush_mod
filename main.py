@@ -237,11 +237,15 @@ class NavigationApp:
                 print("[system] Press Ctrl+C to stop, or say 'stop'")
                 
                 try:
-                    self.vision.run_forever(
+                    frames = self.vision.run_forever(
                         camera_index=args.camera,
                         stop_event=self.stop_event
                     )
+                    if frames:
+                        self._frames_processed += frames
                 except KeyboardInterrupt:
+                    # In case it bubbled up, we still want to save what we got
+                    # But run_forever now returns the count even on interrupt
                     print("\n[system] Interrupted by user")
                     break
                 
