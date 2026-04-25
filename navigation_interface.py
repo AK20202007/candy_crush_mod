@@ -243,13 +243,13 @@ class NavigationInterface:
             self.speak_info(f"Switched to {mode_names.get(mode, 'unknown mode')}")
     
     def set_destination(self, destination: str) -> None:
-        """Set destination and switch to navigation mode."""
+        """Set destination and switch to navigation mode (no speech — verification already confirmed)."""
         self.ui.update_state(
             current_destination=destination,
-            approaching_destination=False
+            approaching_destination=False,
+            mode=UserMode.NAVIGATION
         )
-        self.set_mode(UserMode.NAVIGATION)
-        self.speak_guidance(f"Starting navigation to {destination}")
+        self.ui.clear_message_history()
     
     def clear_destination(self) -> None:
         """Clear destination and return to exploration mode."""

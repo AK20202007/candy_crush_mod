@@ -158,14 +158,8 @@ class NavigationApp:
             self.vision._motion_fall_detector.start(lambda d: self.vision.handle_sensor_fall(f"DRAMATIC elevation change of {d:.1f}m", priority=99))
             self.vision._smv_fall_detector.start(lambda s, x, y: self.vision.handle_sensor_fall(f"Impact force of {s:.1f} m/s^2", priority=10))
             
-            # Start the interface
+            # Start the interface (no speech yet — wait for destination confirmation)
             self.interface.start()
-            
-            # Welcome message
-            self.interface.speak_info(
-                "Welcome to assistive navigation. "
-                "System is ready. Set a destination to begin navigation."
-            )
             
             return True
             
