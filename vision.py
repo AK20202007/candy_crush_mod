@@ -380,6 +380,10 @@ class VisionSystem:
         try:
             while stop_event is None or not stop_event.is_set():
                 try:
+                    # Flush buffer to ensure real-time frame
+                    for _ in range(5):
+                        cap.grab()
+                    
                     ret, frame = cap.read()
                     if not ret:
                         print("[vision] Failed to read frame from webcam")

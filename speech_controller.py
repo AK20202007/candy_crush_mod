@@ -235,6 +235,8 @@ class IntelligentSpeechController:
                 
                 self._messages_spoken += 1
                 self._last_message_type = alert_type
+                # Clear backlog to ensure real-time response
+                self.clear_queues()
                 
                 # Brief pause between messages
                 time.sleep(0.1)
