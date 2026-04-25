@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 import cv2
 import numpy as np
@@ -27,8 +27,6 @@ from agentic_layer import (
     MotionState,
     RouteState,
     SceneState,
-    SurfaceKind,
-    SurfaceObservation,
     UserState,
     WarningEvent,
 )
@@ -49,18 +47,6 @@ CORE_CLASSES: Set[str] = {
     "traffic light",
     "stop sign",
 }
-SIGNAL_CLASSES: Set[str] = {
-    "pedestrian signal",
-    "pedestrian crossing signal",
-    "crosswalk signal",
-    "walk signal",
-    "walk sign",
-    "dont walk sign",
-    "don't walk sign",
-    "do not walk sign",
-    "countdown signal",
-    "traffic signal",
-}
 OPTIONAL_CLASSES: Set[str] = {
     "door",
     "stairs",
@@ -70,7 +56,6 @@ OPTIONAL_CLASSES: Set[str] = {
     "elevator",
     "sign",
     "traffic cone",
-    *SIGNAL_CLASSES,
 }
 
 STOP_WARNING_LABELS = {"stairs", "stair", "staircase", "curb", "car", "bus", "truck"}
@@ -86,27 +71,6 @@ OBSTACLE_LABELS = {
     "bus",
     "truck",
 }
-
-
-def _distance_bucket(distance_m: Optional[float]) -> str:
-    if distance_m is None:
-        return "unknown"
-    if distance_m <= 0.8:
-        return "immediate"
-    if distance_m <= 1.4:
-        return "near"
-    return "far"
-
-
-def _signal_state_from_label(label: str) -> str:
-    normalized = label.lower().replace("_", " ").replace("-", " ")
-    if any(term in normalized for term in {"dont walk", "don't walk", "do not walk", "red hand", "stop hand"}):
-        return "dont_walk"
-    if "countdown" in normalized:
-        return "countdown"
-    if "walk" in normalized:
-        return "walk"
-    return "unknown"
 
 
 @dataclass
@@ -134,11 +98,6 @@ class VisionConfig:
     # distances are consistently too short; decrease if they are too long.
     distance_scale: float = 1.0
 
-    # Lightweight sidewalk/road/curb heuristic. This is intentionally
-    # conservative; production sidewalk navigation should replace or supplement
-    # it with segmentation + depth.
-    enable_surface_heuristic: bool = True
-
 
 class VisionSystem:
     """
@@ -157,17 +116,13 @@ class VisionSystem:
         route_provider: Optional[Callable[[], RouteState]] = None,
         user_provider: Optional[Callable[[], UserState]] = None,
         motion_provider: Optional[Callable[[], MotionState]] = None,
-        on_frame_decision: Optional[Callable[[FrameContext, AgentDecision], None]] = None,
     ) -> None:
         self._on_decision = on_decision
         self._cfg = config or VisionConfig()
-        self._router = router or AgenticNavigationRouter(
-            min_urgent_repeat_interval_ms=int(max(0.2, self._cfg.warning_cooldown_s) * 1000)
-        )
+        self._router = router or AgenticNavigationRouter()
         self._route_provider = route_provider
         self._user_provider = user_provider
         self._motion_provider = motion_provider
-        self._on_frame_decision = on_frame_decision
 
         self._model = YOLO(self._cfg.model_path)
         self._name_to_id: Dict[str, int] = {name.lower(): idx for idx, name in self._model.names.items()}
@@ -241,16 +196,13 @@ class VisionSystem:
             cv2.destroyAllWindows()
 
     def _process_frame(self, frame: np.ndarray, w: int, h: int) -> AgentDecision:
-        now_ms = int(time.time() * 1000)
         detections = self._detect(frame, w, h)
-        warnings = self._warnings_from_detections(detections, now_ms)
-        surfaces = self._surface_observations(frame, w, h) if self._cfg.enable_surface_heuristic else []
+        warnings = self._warnings_from_detections(detections)
         ctx = FrameContext(
-            timestamp_ms=now_ms,
+            timestamp_ms=int(time.time() * 1000),
             frame_id=str(time.time()),
             detections=detections,
             warnings=warnings,
-            surfaces=surfaces,
             motion=self._motion_state(),
             route=self._route_state(),
             scene=SceneState(
@@ -262,11 +214,6 @@ class VisionSystem:
         )
         decision = self._router.decide(ctx)
         self._draw_decision(frame, decision)
-        if self._on_frame_decision is not None:
-            try:
-                self._on_frame_decision(ctx, decision)
-            except Exception as exc:
-                print(f"[vision] decision logger failed: {exc}")
         return decision
 
     def _detect(self, frame: np.ndarray, w: int, h: int) -> List[Detection]:
@@ -310,21 +257,19 @@ class VisionSystem:
                 distance_scale=self._cfg.distance_scale,
                 source="ultralytics-yolov8-distance",
             )
-            self._augment_signal_attributes(frame, det)
             detections.append(det)
             self._draw_detection(frame, det)
 
         return detections
 
-    def _warnings_from_detections(self, detections: List[Detection], observed_at_ms: Optional[int] = None) -> List[WarningEvent]:
+    def _warnings_from_detections(self, detections: List[Detection]) -> List[WarningEvent]:
         n_confirm = max(1, self._cfg.confirm_frames)
-        observed_at_ms = observed_at_ms or int(time.time() * 1000)
         raw: List[WarningEvent] = []
 
         for det in detections:
             label = det.label.lower()
             area_ratio = float(det.attributes.get("area_ratio", 0.0) or 0.0)
-            centered = self._is_centered_for_warning(det)
+            centered = det.direction in {Direction.CENTER, Direction.SLIGHT_LEFT, Direction.SLIGHT_RIGHT}
             close = det.distance_m is not None and det.distance_m <= 1.4
             large = area_ratio >= self._cfg.obstacle_area_ratio
 
@@ -338,10 +283,9 @@ class VisionSystem:
                         distance_m=det.distance_m,
                         direction=det.direction,
                         source="vision-yolo-distance",
-                        observed_at_ms=observed_at_ms,
                     )
                 )
-            elif label == "person" and centered and (close or large):
+            elif label == "person" and centered:
                 raw.append(
                     WarningEvent(
                         kind="person",
@@ -351,7 +295,6 @@ class VisionSystem:
                         distance_m=det.distance_m,
                         direction=det.direction,
                         source="vision-yolo-distance",
-                        observed_at_ms=observed_at_ms,
                     )
                 )
             elif label in OBSTACLE_LABELS and centered and (close or large):
@@ -364,14 +307,13 @@ class VisionSystem:
                         distance_m=det.distance_m,
                         direction=det.direction,
                         source="vision-yolo-distance",
-                        observed_at_ms=observed_at_ms,
                     )
                 )
 
         confirmed: List[WarningEvent] = []
         current_keys = set()
         for warning in raw:
-            key = f"{warning.kind}:{warning.message}:{warning.direction.value}:{_distance_bucket(warning.distance_m)}"
+            key = f"{warning.kind}:{warning.direction.value}"
             current_keys.add(key)
             self._consec_warning_hits[key] = self._consec_warning_hits.get(key, 0) + 1
             if self._consec_warning_hits[key] >= n_confirm:
@@ -383,189 +325,6 @@ class VisionSystem:
                 self._consec_warning_hits[key] = 0
 
         return confirmed
-
-    def _is_centered_for_warning(self, det: Detection) -> bool:
-        if det.direction not in {Direction.CENTER, Direction.SLIGHT_LEFT, Direction.SLIGHT_RIGHT}:
-            return False
-        if det.label != "person":
-            return True
-        center_x = det.attributes.get("center_x_ratio")
-        if center_x is None:
-            return True
-        return abs(float(center_x) - 0.5) <= max(0.05, self._cfg.person_center_radius)
-
-    def _augment_signal_attributes(self, frame: np.ndarray, det: Detection) -> None:
-        label = det.label.lower()
-        if label in {"traffic light", "traffic signal"}:
-            state, confidence, scores = self._estimate_traffic_light_state(frame, det)
-            det.attributes["signal_category"] = "traffic_light"
-            det.attributes["signal_state"] = state
-            det.attributes["signal_state_confidence"] = confidence
-            det.attributes["traffic_light_color_scores"] = scores
-        elif label == "stop sign":
-            det.attributes["signal_category"] = "stop_sign"
-            det.attributes["signal_state"] = "stop_sign"
-        elif label in SIGNAL_CLASSES:
-            det.attributes["signal_category"] = "pedestrian_signal"
-            det.attributes["signal_state"] = _signal_state_from_label(label)
-
-    def _surface_observations(self, frame: np.ndarray, w: int, h: int) -> List[SurfaceObservation]:
-        if w <= 0 or h <= 0:
-            return []
-
-        y1 = int(h * 0.58)
-        y2 = h
-        if y2 - y1 < 16:
-            return []
-
-        bands = [
-            (Direction.LEFT, 0.0, 0.36),
-            (Direction.CENTER, 0.32, 0.68),
-            (Direction.RIGHT, 0.64, 1.0),
-        ]
-        observations: List[SurfaceObservation] = []
-        for direction, x_start, x_end in bands:
-            x1 = int(w * x_start)
-            x2 = int(w * x_end)
-            crop = frame[y1:y2, x1:x2]
-            if crop.size == 0:
-                continue
-            obs = self._classify_surface_crop(crop, direction)
-            if obs is not None:
-                observations.append(obs)
-
-        curb = self._estimate_curb_edge(frame, w, h)
-        if curb is not None:
-            observations.append(curb)
-        return observations
-
-    def _classify_surface_crop(self, crop: np.ndarray, direction: Direction) -> Optional[SurfaceObservation]:
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        sat = hsv[:, :, 1].astype(np.float32)
-        val = hsv[:, :, 2].astype(np.float32)
-
-        low_sat = sat < 55
-        gray_ratio = float(np.mean(low_sat))
-        bright_ratio = float(np.mean(low_sat & (val >= 105)))
-        dark_ratio = float(np.mean(low_sat & (val < 105)))
-        near_field_ratio = max(bright_ratio, dark_ratio)
-
-        if near_field_ratio < 0.32:
-            return None
-
-        if dark_ratio > bright_ratio * 1.25:
-            kind = SurfaceKind.ROAD
-            confidence = min(0.72, 0.38 + dark_ratio * 0.45 + gray_ratio * 0.10)
-        else:
-            kind = SurfaceKind.SIDEWALK
-            confidence = min(0.68, 0.34 + bright_ratio * 0.42 + gray_ratio * 0.10)
-
-        if confidence < 0.42:
-            return None
-
-        return SurfaceObservation(
-            kind=kind,
-            confidence=confidence,
-            direction=direction,
-            near_field_ratio=near_field_ratio,
-            distance_m=0.8 if direction == Direction.CENTER else 1.2,
-            source="vision-surface-heuristic",
-            attributes={
-                "gray_ratio": round(gray_ratio, 3),
-                "bright_gray_ratio": round(bright_ratio, 3),
-                "dark_gray_ratio": round(dark_ratio, 3),
-                "note": "color/texture heuristic; use segmentation+depth for deployment",
-            },
-        )
-
-    @staticmethod
-    def _estimate_curb_edge(frame: np.ndarray, w: int, h: int) -> Optional[SurfaceObservation]:
-        y1 = int(h * 0.48)
-        y2 = int(h * 0.84)
-        x1 = int(w * 0.20)
-        x2 = int(w * 0.80)
-        crop = frame[y1:y2, x1:x2]
-        if crop.size == 0 or crop.shape[0] < 16 or crop.shape[1] < 16:
-            return None
-
-        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 60, 160)
-        lines = cv2.HoughLinesP(
-            edges,
-            rho=1,
-            theta=np.pi / 180,
-            threshold=max(18, crop.shape[1] // 8),
-            minLineLength=max(24, crop.shape[1] // 4),
-            maxLineGap=12,
-        )
-        if lines is None:
-            return None
-
-        best_len = 0.0
-        best_y = None
-        for line in lines[:, 0]:
-            lx1, ly1, lx2, ly2 = [float(v) for v in line]
-            dx = lx2 - lx1
-            dy = ly2 - ly1
-            if abs(dx) < 1.0:
-                continue
-            slope = abs(dy / dx)
-            if slope > 0.18:
-                continue
-            length = float((dx * dx + dy * dy) ** 0.5)
-            if length > best_len:
-                best_len = length
-                best_y = (ly1 + ly2) / 2.0
-
-        if best_y is None:
-            return None
-
-        length_ratio = best_len / max(1.0, crop.shape[1])
-        if length_ratio < 0.35:
-            return None
-        y_ratio = best_y / max(1.0, crop.shape[0])
-        distance_m = 0.6 + y_ratio * 1.2
-        return SurfaceObservation(
-            kind=SurfaceKind.CURB,
-            confidence=min(0.78, 0.40 + length_ratio * 0.40),
-            direction=Direction.CENTER,
-            near_field_ratio=min(1.0, length_ratio),
-            distance_m=distance_m,
-            source="vision-curb-edge-heuristic",
-            attributes={"horizontal_edge_ratio": round(length_ratio, 3), "edge_y_ratio": round(y_ratio, 3)},
-        )
-
-    @staticmethod
-    def _estimate_traffic_light_state(frame: np.ndarray, det: Detection) -> tuple[str, float, Dict[str, int]]:
-        if det.bbox is None:
-            return "unknown", 0.0, {}
-
-        h, w = frame.shape[:2]
-        x1 = max(0, min(w - 1, int(det.bbox.x1)))
-        y1 = max(0, min(h - 1, int(det.bbox.y1)))
-        x2 = max(x1 + 1, min(w, int(det.bbox.x2)))
-        y2 = max(y1 + 1, min(h, int(det.bbox.y2)))
-        crop = frame[y1:y2, x1:x2]
-        if crop.size == 0:
-            return "unknown", 0.0, {}
-
-        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
-        red1 = cv2.inRange(hsv, np.array([0, 70, 80]), np.array([10, 255, 255]))
-        red2 = cv2.inRange(hsv, np.array([170, 70, 80]), np.array([180, 255, 255]))
-        yellow = cv2.inRange(hsv, np.array([15, 70, 80]), np.array([35, 255, 255]))
-        green = cv2.inRange(hsv, np.array([40, 50, 60]), np.array([95, 255, 255]))
-
-        scores = {
-            "red": int(cv2.countNonZero(red1) + cv2.countNonZero(red2)),
-            "yellow": int(cv2.countNonZero(yellow)),
-            "green": int(cv2.countNonZero(green)),
-        }
-        total = max(1, int(crop.shape[0] * crop.shape[1]))
-        state, score = max(scores.items(), key=lambda item: item[1])
-        min_pixels = max(8, int(total * 0.01))
-        if score < min_pixels:
-            return "unknown", 0.0, scores
-        return state, min(1.0, score / max(min_pixels * 4, 1)), scores
 
     def _route_state(self) -> RouteState:
         if self._route_provider is None:

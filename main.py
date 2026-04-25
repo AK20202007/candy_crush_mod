@@ -1,27 +1,30 @@
 #!/usr/bin/env python3
 """
-Assistive navigation prototype: webcam + YOLO warnings + mock directions.
+Assistive navigation prototype with an agentic routing layer.
 
-Combines:
-  - vision.py  : person / obstacle cues
-  - speech.py  : pyttsx3 with urgent vs normal priority
-  - navigation.py : scripted spoken directions (or real steps via routing.py)
+Flow:
+  webcam + YOLOv8 + distance heuristic
+      -> detections/warnings/context
+      -> AgenticNavigationRouter
+      -> urgent/normal speech
 
-Optional maps: set OPENROUTESERVICE_API_KEY and pass --origin lon,lat (see routing.py).
-
-Run from this folder:
-  python main.py
+Optional maps: set OPENROUTESERVICE_API_KEY and pass --origin lon,lat.
 """
-
 from __future__ import annotations
 
 import argparse
 import os
 import threading
+from typing import Optional
 
-from navigation import RouteStep, run_live_navigation_loop, run_navigation_loop
-from routing import build_maps_route, google_walking_directions, google_walking_route_steps
+from agentic_layer import AgentAction, AgentDecision, AgenticNavigationRouter, MotionState, RouteState, UserState
+from agentic_layer.config import DEFAULT_PROFILE_NAME, choose, load_profile, load_profiles
+from agentic_layer.database import MongoTelemetryStore
+from indoor_routing import IndoorGraph, find_node_by_name, load_graph_from_json
+from navigation import run_navigation_loop
+from routing import build_maps_route
 from speech import SpeechController
+from voice_input import DestinationCaptureConfig, VoiceInputError, capture_destination_by_voice, capture_destination_with_codeword
 from vision import VisionConfig, VisionSystem
 
 
@@ -35,254 +38,295 @@ def _parse_origin_lon_lat(text: str) -> tuple[float, float]:
     return lon, lat
 
 
-def _parse_lat_lon(text: str) -> tuple[float, float]:
-    parts = [p.strip() for p in text.split(",")]
-    if len(parts) != 2:
-        raise ValueError('Expected "lat,lon".')
-    lat, lon = float(parts[0]), float(parts[1])
-    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
-        raise ValueError("Latitude or longitude out of range.")
-    return lat, lon
+class SharedRouteContext:
+    """Thread-safe route state shared between navigation thread and vision agent."""
 
-
-class LiveLocationStore:
-    """Thread-safe holder for latest simulated/real location sample."""
-
-    def __init__(self) -> None:
+    def __init__(self, destination: str) -> None:
         self._lock = threading.Lock()
-        self._latest: tuple[float, float] | None = None
+        self._state = RouteState(active=False, destination=destination)
 
-    def set(self, lat: float, lon: float) -> None:
+    def update_instruction(self, message: str) -> None:
         with self._lock:
-            self._latest = (lat, lon)
+            self._state = RouteState(
+                active=True,
+                destination=self._state.destination,
+                next_instruction=message.strip(),
+                off_route=False,
+            )
 
-    def get(self) -> tuple[float, float] | None:
+    def get(self) -> RouteState:
         with self._lock:
-            return self._latest
+            return RouteState(
+                active=self._state.active,
+                destination=self._state.destination,
+                next_instruction=self._state.next_instruction,
+                next_turn_distance_m=self._state.next_turn_distance_m,
+                off_route=self._state.off_route,
+            )
 
 
-def _simulate_location_input_loop(store: LiveLocationStore, stop_event: threading.Event) -> None:
-    print('[sim] Live location simulation enabled. Type coordinates as "lat,lon" then Enter.')
-    print('[sim] Example: 37.4275,-122.1697  (Ctrl+C or q to quit app)')
-    while not stop_event.is_set():
-        try:
-            raw = input().strip()
-        except EOFError:
-            return
-        if not raw:
-            continue
-        if raw.lower() in {"q", "quit", "exit"}:
-            stop_event.set()
-            return
-        try:
-            lat, lon = _parse_lat_lon(raw)
-            store.set(lat, lon)
-            print(f"[sim] location updated: lat={lat:.6f}, lon={lon:.6f}")
-        except ValueError as exc:
-            print(f"[sim] invalid coordinate ({exc}); expected: lat,lon")
+def build_parser() -> argparse.ArgumentParser:
+    profile_names = sorted(load_profiles())
+    parser = argparse.ArgumentParser(description="Assistive navigation prototype (agentic webcam + YOLO + TTS).")
+    parser.add_argument("--profile", choices=profile_names, default=DEFAULT_PROFILE_NAME, help="Runtime profile from config/agentic_profiles.json.")
+    parser.add_argument("--camera", type=int, default=0, help="OpenCV camera index (default: 0).")
+    parser.add_argument("--nav-interval", type=float, default=5.0, help="Seconds between navigation prompts (default: 5).")
+    parser.add_argument("--model", type=str, default=None, help="Override profile Ultralytics weights path or name.")
+    parser.add_argument("--conf", type=float, default=None, help="Override profile minimum detection confidence.")
+    parser.add_argument("--iou", type=float, default=None, help="Override profile NMS IoU threshold for predict().")
+    parser.add_argument("--imgsz", type=int, default=None, help="Override profile square inference size.")
+    parser.add_argument("--confirm-frames", type=int, default=None, help="Override profile consecutive frames before warning.")
+    parser.add_argument("--augment", action="store_true", help="Enable test-time augmentation.")
+    parser.add_argument("--no-half", action="store_true", help="Disable FP16 inference on CUDA.")
+    parser.add_argument("--origin", type=str, default=None, help='Walking start as "longitude,latitude" for ORS routing.')
+    parser.add_argument("--destination", type=str, default=None, help="Destination text for non-interactive runs; skips voice capture.")
+    parser.add_argument("--typed-destination", action="store_true", help="Use the old terminal destination prompt instead of voice capture.")
+    parser.add_argument("--indoor-layout", type=str, default=None, help="Path to indoor layout JSON file for indoor routing.")
+    parser.add_argument("--indoor-start-node", type=str, default="entrance", help="Starting node ID for indoor routing (default: entrance).")
+    parser.add_argument("--voice-timeout-s", type=float, default=8.0, help="Seconds to listen for spoken destination.")
+    parser.add_argument("--voice-attempts", type=int, default=2, help="How many times to retry spoken destination capture.")
+    parser.add_argument("--voice-locale", type=str, default="en_US", help="Speech recognizer locale for destination capture.")
+    parser.add_argument("--codeword", type=str, default="navigate", help="Word that starts continuous destination capture.")
+    parser.add_argument("--stop-word", type=str, default="stop", help="Word that ends continuous destination capture.")
+    parser.add_argument("--no-codeword", action="store_true", help="Use one-shot spoken destination capture instead of codeword start/stop capture.")
+    parser.add_argument("--allow-network-speech", action="store_true", help="Allow Apple Speech to use network recognition if on-device recognition is unavailable.")
+
+    # Agentic layer knobs.
+    parser.add_argument("--target", type=str, default=None, help="Object/search target, e.g. door, chair, elevator.")
+    parser.add_argument("--query", type=str, default=None, help='User-style query, e.g. "where is the door?"')
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="auto",
+        choices=["auto", "orientation", "wayfinding", "object_search", "ocr"],
+        help="Agentic mode hint.",
+    )
+    parser.add_argument("--standing-still", action="store_true", help="Tell the agent the user is not walking.")
+    parser.add_argument("--location-type", type=str, default=None, help="Override profile scene hint: hallway, room, sidewalk, street_crossing, etc.")
+    parser.add_argument("--visual-confidence", type=float, default=None, help="Override profile visual confidence hint.")
+    parser.add_argument(
+        "--distance-scale",
+        type=float,
+        default=None,
+        help="Override profile bbox distance multiplier. Increase if estimated distances are too short.",
+    )
+    parser.add_argument(
+        "--obstacle-area-ratio",
+        type=float,
+        default=None,
+        help="Override profile area threshold for close obstacle warnings.",
+    )
+    parser.add_argument(
+        "--person-center-radius",
+        type=float,
+        default=None,
+        help="Override profile normalized center radius for person warnings.",
+    )
+    parser.add_argument(
+        "--warning-cooldown-s",
+        type=float,
+        default=None,
+        help="Override profile urgent warning cooldown used by the vision-owned router.",
+    )
+    parser.add_argument(
+        "--agent-repeat-ms",
+        type=int,
+        default=None,
+        help="Override profile minimum repeat interval for non-critical agent speech.",
+    )
+    parser.add_argument(
+        "--agent-urgent-repeat-ms",
+        type=int,
+        default=None,
+        help="Override profile minimum repeat interval for repeated urgent safety speech.",
+    )
+    return parser
+
+
+def _get_destination(args: argparse.Namespace, speech: SpeechController) -> str:
+    if args.destination:
+        destination = args.destination.strip()
+        print(f"[main] Destination from --destination: {destination}")
+        return destination
+
+    if args.typed_destination:
+        destination = input("Enter destination (place name or address; mock text if not using maps): ").strip()
+        if destination:
+            return destination
+        destination = "the lobby"
+        print(f"[main] No destination entered; using default: {destination}")
+        return destination
+
+    print("[main] Listening for destination. Speak after the prompt.")
+    try:
+        voice_config = DestinationCaptureConfig(
+            timeout_s=args.voice_timeout_s,
+            locale=args.voice_locale,
+            prefer_on_device=not args.allow_network_speech,
+            attempts=args.voice_attempts,
+            codeword=args.codeword,
+            stop_word=args.stop_word,
+        )
+        if args.no_codeword:
+            destination = capture_destination_by_voice(speak=speech.speak_normal, config=voice_config)
+        else:
+            destination = capture_destination_with_codeword(speak=speech.speak_normal, config=voice_config)
+        print(f"[main] Heard destination: {destination}")
+        return destination
+    except VoiceInputError as exc:
+        destination = "the lobby"
+        print(f"[main] Voice destination capture failed ({exc}); using default: {destination}")
+        speech.speak_normal(f"I could not hear a destination. Using {destination}.")
+        return destination
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Assistive navigation prototype (webcam + YOLO + TTS).")
-    parser.add_argument(
-        "--camera",
-        type=int,
-        default=0,
-        help="OpenCV camera index (default: 0).",
-    )
-    parser.add_argument(
-        "--nav-interval",
-        type=float,
-        default=5.0,
-        help="Seconds between spoken navigation prompts (default: 5).",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="yolov8n.pt",
-        help="Ultralytics weights path or name (default: yolov8n.pt). Try yolov8s.pt for higher accuracy.",
-    )
-    parser.add_argument(
-        "--conf",
-        type=float,
-        default=0.35,
-        help="Minimum detection confidence (default: 0.35). Lower recalls more; higher reduces false positives.",
-    )
-    parser.add_argument(
-        "--iou",
-        type=float,
-        default=0.5,
-        help="NMS IoU threshold for predict() (default: 0.5).",
-    )
-    parser.add_argument(
-        "--imgsz",
-        type=int,
-        default=640,
-        help="Square inference size (default: 640). 960 or 1280 can help small objects at a FPS cost.",
-    )
-    parser.add_argument(
-        "--confirm-frames",
-        type=int,
-        default=2,
-        help="Consecutive frames with a hazard before speaking (default: 2). Increase to reduce flicker.",
-    )
-    parser.add_argument(
-        "--augment",
-        action="store_true",
-        help="Enable test-time augmentation (slower, may improve hard frames).",
-    )
-    parser.add_argument(
-        "--no-half",
-        action="store_true",
-        help="Disable FP16 inference on CUDA (default: FP16 on CUDA when available).",
-    )
-    parser.add_argument(
-        "--origin",
-        type=str,
-        default=None,
-        help='Walking start as "longitude,latitude" (required for real map directions).',
-    )
-    parser.add_argument(
-        "--maps-provider",
-        type=str,
-        default="auto",
-        choices=("auto", "ors", "google"),
-        help="Routing backend: auto, ors, or google (default: auto).",
-    )
-    parser.add_argument(
-        "--live-nav",
-        action="store_true",
-        help="Advance map instructions by live location progress instead of time intervals.",
-    )
-    parser.add_argument(
-        "--arrival-radius-m",
-        type=float,
-        default=14.0,
-        help="Meters from a maneuver endpoint to count the step as completed (live-nav mode).",
-    )
-    args = parser.parse_args()
+    args = build_parser().parse_args()
+    profile = load_profile(args.profile)
 
-    print("=== Assistive Navigation Prototype ===")
+    print("=== Assistive Navigation Prototype + Agentic Layer ===")
+    print(f"[main] Runtime profile: {profile.name} — {profile.description}")
     print("Loading speech engine...")
     speech = SpeechController()
     speech.start()
 
-    destination = input("Enter destination (place name or address; mock text if not using maps): ").strip()
-    if not destination:
-        destination = "the lobby"
-        print(f"[main] No destination entered; using default: {destination}")
+    destination = _get_destination(args, speech)
 
-    nav_route: list[str] | None = None
-    nav_live_steps: list[RouteStep] | None = None
+    nav_route: Optional[list[str]] = None
     repeat_nav = True
     ors_key = (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip()
-    google_key = (os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip()
-    if args.origin:
+    
+    # Indoor routing
+    indoor_graph: Optional[IndoorGraph] = None
+    indoor_route_steps: Optional[list[str]] = None
+    if args.indoor_layout:
         try:
-            start = _parse_origin_lon_lat(args.origin)
-            provider = args.maps_provider
-            if provider == "auto":
-                if google_key:
-                    provider = "google"
-                elif ors_key:
-                    provider = "ors"
-                else:
-                    provider = "none"
-
-            if provider == "google":
-                if not google_key:
-                    raise RuntimeError("GOOGLE_MAPS_API_KEY is not set.")
-                if args.live_nav:
-                    nav_live_steps = google_walking_route_steps(google_key, start, destination)
-                    nav_route = [f"Starting map navigation toward {destination.strip()}."]
-                    print(f"[main] Google Maps live-nav: {len(nav_live_steps)} maneuver steps loaded.")
-                else:
-                    nav_route = google_walking_directions(google_key, start, destination)
-                    print(f"[main] Google Maps: {len(nav_route)} spoken steps loaded.")
-            elif provider == "ors":
-                if not ors_key:
-                    raise RuntimeError("OPENROUTESERVICE_API_KEY is not set.")
-                nav_route = build_maps_route(ors_key, start, destination)
-                print(f"[main] OpenRouteService: {len(nav_route)} spoken steps loaded.")
+            layout_path = Path(args.indoor_layout)
+            if not layout_path.exists():
+                layout_path = Path(__file__).resolve().parents[0] / "config" / args.indoor_layout
+            indoor_graph = load_graph_from_json(layout_path)
+            print(f"[main] Loaded indoor layout from {layout_path}")
+            
+            # Find destination node
+            dest_node_id = find_node_by_name(indoor_graph, destination)
+            if not dest_node_id:
+                print(f"[main] Could not find node matching '{destination}' in indoor layout")
+                dest_node_id = find_node_by_name(indoor_graph, "lobby") or args.indoor_start_node
+            
+            start_node_id = args.indoor_start_node
+            if dest_node_id:
+                route = indoor_graph.find_route(start_node_id, dest_node_id)
+                indoor_route_steps = [step.instruction for step in route.steps]
+                print(f"[main] Indoor route: {len(indoor_route_steps)} steps, {route.total_distance_m:.1f}m total")
+                for i, step in enumerate(indoor_route_steps, 1):
+                    print(f"  {i}. {step}")
             else:
-                print("[main] --origin set but no map API key found; using mock navigation.")
-
-            if nav_route:
-                repeat_nav = False
+                print("[main] Using mock navigation (no destination node found)")
         except Exception as exc:
-            print(f"[main] Maps routing failed ({exc}); using mock navigation.")
-    else:
-        if google_key or ors_key:
-            print("[main] Map API key detected; add --origin=lon,lat to enable turn-by-turn directions.")
+            print(f"[main] Indoor routing failed ({exc}); using mock navigation.")
+    
+    # Outdoor routing (ORS)
+    if args.origin and not indoor_route_steps:
+        if not ors_key:
+            print("[main] --origin set but OPENROUTESERVICE_API_KEY is unset; using mock navigation.")
+        else:
+            try:
+                start = _parse_origin_lon_lat(args.origin)
+                nav_route = build_maps_route(ors_key, start, destination)
+                repeat_nav = False
+                print(f"[main] OpenRouteService: {len(nav_route)} spoken steps loaded.")
+            except Exception as exc:
+                print(f"[main] Maps routing failed ({exc}); using mock navigation.")
+    elif ors_key:
+        print("[main] OPENROUTESERVICE_API_KEY is set; add --origin lon,lat for walking directions from ORS.")
 
     stop_event = threading.Event()
-    location_store = LiveLocationStore()
+    route_context = SharedRouteContext(destination=destination)
+    telemetry_store = MongoTelemetryStore.from_env()
+    if telemetry_store.enabled:
+        print("[main] MongoDB telemetry enabled.")
+    else:
+        print(f"[main] MongoDB telemetry disabled: {telemetry_store.unavailable_reason}")
 
-    def urgent_say(msg: str) -> None:
-        speech.speak_urgent(msg)
-        print(f"[vision->speech] URGENT: {msg}")
-
-    vcfg = VisionConfig(
-        model_path=args.model,
-        conf=args.conf,
-        iou=args.iou,
-        imgsz=args.imgsz,
-        confirm_frames=args.confirm_frames,
-        augment=args.augment,
-        half=False if args.no_half else None,
-    )
-    vision = VisionSystem(on_warning=urgent_say, config=vcfg)
-
-    print(f"[main] Model will track labels: {sorted(vision.active_class_labels())}")
-    nav_mode = "mock directions"
-    if nav_live_steps:
-        nav_mode = "map route (live progress)"
-    elif nav_route:
-        nav_mode = "map route"
-    print(f"[main] Navigation thread starting ({nav_mode}).")
-
-    def nav_speak(msg: str) -> None:
-        speech.speak_normal(msg)
-        print(f"[nav->speech] {msg}")
-
-    nav_target = run_navigation_loop
-    nav_kwargs = {
-        "destination": destination,
-        "speak": nav_speak,
-        "interval_seconds": args.nav_interval,
-        "stop_event": stop_event,
-        "route": nav_route,
-        "repeat_route": repeat_nav,
-    }
-    if nav_live_steps:
-        nav_target = run_live_navigation_loop
-        nav_kwargs = {
-            "route_steps": nav_live_steps,
-            "speak": nav_speak,
-            "get_location": location_store.get,
-            "stop_event": stop_event,
-            "arrival_radius_m": args.arrival_radius_m,
-        }
+    def route_update(msg: str) -> None:
+        # Do not speak immediately. The agent decides whether route guidance or
+        # a safety/object warning should be spoken in the current frame.
+        route_context.update_instruction(msg)
+        print(f"[nav->agent] {msg}")
 
     nav_thread = threading.Thread(
-        target=nav_target,
-        kwargs=nav_kwargs,
+        target=run_navigation_loop,
+        kwargs={
+            "destination": destination,
+            "speak": route_update,
+            "interval_seconds": args.nav_interval,
+            "stop_event": stop_event,
+            "route": indoor_route_steps if indoor_route_steps else nav_route,
+            "repeat_route": repeat_nav,
+        },
         name="Navigation",
         daemon=True,
     )
     nav_thread.start()
 
-    sim_thread = None
-    if nav_live_steps:
-        sim_thread = threading.Thread(
-            target=_simulate_location_input_loop,
-            kwargs={"store": location_store, "stop_event": stop_event},
-            name="LocationSimulator",
-            daemon=True,
-        )
-        sim_thread.start()
+    router = AgenticNavigationRouter(
+        min_repeat_interval_ms=choose(args.agent_repeat_ms, profile.agent_repeat_ms),
+        min_urgent_repeat_interval_ms=choose(args.agent_urgent_repeat_ms, profile.agent_urgent_repeat_ms),
+    )
 
-    print("[main] Starting vision loop (opens a small preview window).")
+    def user_state() -> UserState:
+        return UserState(query=args.query, target=args.target, mode=args.mode, verbosity="minimal")
+
+    def motion_state() -> MotionState:
+        return MotionState(is_moving=not args.standing_still)
+
+    def handle_decision(decision: AgentDecision) -> None:
+        print(
+            f"[agent->speech] action={decision.action.value} priority={decision.priority} "
+            f"haptic={decision.haptic.value}: {decision.message}"
+        )
+        # Print all agent candidates for debugging
+        if "candidates" in decision.debug:
+            print(f"[debug] All candidates:")
+            for i, c in enumerate(decision.debug["candidates"], 1):
+                print(f"  {i}. {c['action']} (priority={c['priority']}) by {c['agents']}: {c['message']}")
+        if decision.action == AgentAction.WARN or decision.priority >= 80:
+            speech.speak_urgent(decision.message)
+        else:
+            speech.speak_normal(decision.message)
+
+    vcfg = VisionConfig(
+        model_path=choose(args.model, profile.model_path),
+        obstacle_area_ratio=choose(args.obstacle_area_ratio, profile.obstacle_area_ratio),
+        person_center_radius=choose(args.person_center_radius, profile.person_center_radius),
+        warning_cooldown_s=choose(args.warning_cooldown_s, profile.warning_cooldown_s),
+        conf=choose(args.conf, profile.conf),
+        iou=choose(args.iou, profile.iou),
+        imgsz=choose(args.imgsz, profile.imgsz),
+        confirm_frames=choose(args.confirm_frames, profile.confirm_frames),
+        augment=args.augment,
+        half=False if args.no_half else None,
+        assume_moving=not args.standing_still,
+        location_type=choose(args.location_type, profile.location_type),
+        visual_confidence=choose(args.visual_confidence, profile.visual_confidence),
+        distance_scale=choose(args.distance_scale, profile.distance_scale),
+    )
+
+    vision = VisionSystem(
+        on_decision=handle_decision,
+        config=vcfg,
+        router=router,
+        route_provider=route_context.get,
+        user_provider=user_state,
+        motion_provider=motion_state,
+        on_frame_decision=telemetry_store.record_decision if telemetry_store.enabled else None,
+    )
+
+    print(f"[main] Model will track labels: {sorted(vision.active_class_labels()) or 'all'}")
+    print("[main] Agentic router is active. Safety warnings override route guidance.")
+    if args.target or args.query:
+        print(f"[main] User intent hint: target={args.target!r}, query={args.query!r}, mode={args.mode!r}")
+
     try:
         vision.run_forever(camera_index=args.camera, stop_event=stop_event)
     except KeyboardInterrupt:
@@ -291,8 +335,6 @@ def main() -> None:
         stop_event.set()
         speech.stop()
         nav_thread.join(timeout=2.0)
-        if sim_thread is not None:
-            sim_thread.join(timeout=0.5)
         print("[main] Goodbye.")
 
 
