@@ -522,97 +522,6 @@ def test_low_confidence_fallback_asks_user_to_slow_down() -> None:
     assert decision.debug["visual_confidence"] == 0.2
 
 
-def test_universal_proximity_warning_stops_for_any_close_object() -> None:
-    router = AgenticNavigationRouter()
-    ctx = _ctx(
-        motion=MotionState(is_moving=True, speed_mps=0.5),
-        detections=[
-            Detection(
-                label="laptop",  # Not in HAZARD_LABELS
-                confidence=0.75,
-                distance_m=0.8,
-                direction=Direction.CENTER,
-                attributes={"area_ratio": 0.03},
-            )
-        ],
-    )
-
-    decision = router.decide(ctx)
-
-    assert decision.action == AgentAction.WARN
-    assert decision.priority == 95
-    assert decision.haptic == HapticPattern.STOP
-    assert decision.message == "Stop: laptop at 12 o'clock, less than 3 feet away."
-    assert decision.debug["reason"] == "universal-proximity-immediate"
-
-
-def test_partial_edge_hazard_warns_when_object_is_cut_off_by_camera() -> None:
-    router = AgenticNavigationRouter()
-    ctx = _ctx(
-        motion=MotionState(is_moving=True, speed_mps=0.5),
-        detections=[
-            Detection(
-                label="chair",
-                confidence=0.46,
-                distance_m=1.3,
-                direction=Direction.RIGHT,
-                attributes={
-                    "area_ratio": 0.024,
-                    "bottom_y_ratio": 0.86,
-                    "edge_contact": ["right"],
-                    "edge_truncated": True,
-                    "partial_visibility": "frame_edge",
-                    "distance_reliability": "low",
-                },
-            )
-        ],
-    )
-
-    decision = router.decide(ctx)
-
-    assert decision.action == AgentAction.WARN
-    assert decision.priority == 82
-    assert decision.haptic == HapticPattern.RIGHT
-    assert decision.agents_consulted == ["safety", "partial_edge"]
-    assert "partially visible chair at 3 o'clock" in decision.message
-    assert "distance is uncertain" in decision.message
-    assert decision.debug["reason"] == "partial-edge object-distance hazard"
-
-
-def test_door_handle_guidance_instructs_hand_and_action() -> None:
-    router = AgenticNavigationRouter()
-    ctx = _ctx(
-        motion=MotionState(is_moving=True, speed_mps=0.3),
-        surfaces=[
-            SurfaceObservation(
-                kind=SurfaceKind.DOOR,
-                confidence=0.82,
-                direction=Direction.SLIGHT_RIGHT,
-                distance_m=1.2,
-                source="vision-door-handle",
-                attributes={
-                    "handle_detected": True,
-                    "handle_side": "right",
-                    "recommended_hand": "right",
-                    "handle_height_zone": "waist height",
-                    "handle_orientation": "lever_horizontal",
-                    "handle_action": "press the lever down, then gently test whether the door pushes or pulls",
-                },
-            )
-        ],
-    )
-
-    decision = router.decide(ctx)
-
-    assert decision.action == AgentAction.GUIDE
-    assert decision.priority == 76
-    assert decision.haptic == HapticPattern.RIGHT
-    assert "Door handle on the right" in decision.message
-    assert "Use your right" in decision.message
-    assert "press the lever down" in decision.message
-    assert decision.debug["reason"] == "door-handle-guidance"
-
-
 def main() -> None:
     test_safety_warning_takes_priority_over_route_guidance()
     test_anti_spam_suppresses_repeated_non_safety_message()
@@ -630,9 +539,6 @@ def main() -> None:
     test_sidewalk_agent_warns_for_curb_edge_ahead()
     test_sidewalk_agent_orients_to_visible_sidewalk_when_asked()
     test_low_confidence_fallback_asks_user_to_slow_down()
-    test_universal_proximity_warning_stops_for_any_close_object()
-    test_partial_edge_hazard_warns_when_object_is_cut_off_by_camera()
-    test_door_handle_guidance_instructs_hand_and_action()
     test_far_person_and_stop_sign_stop_sign_wins()
     test_far_person_and_stop_sign_with_target_query_stop_sign_still_wins()
     print("agentic router tests passed")

@@ -31,8 +31,7 @@ import requests
 
 # Try to import elevenlabs
 try:
-    from elevenlabs import ElevenLabs, VoiceSettings
-    from elevenlabs.client import ElevenLabs as ElevenLabsClient
+    from elevenlabs import ElevenLabs
     ELEVENLABS_AVAILABLE = True
 except ImportError:
     ELEVENLABS_AVAILABLE = False
@@ -57,12 +56,14 @@ class ElevenLabsSpeechController:
     speech recognition for assistive navigation.
     """
     
-    # Default voice IDs (can be customized)
+    # Default voice IDs (using standard ElevenLabs preset voices)
     DEFAULT_VOICES = {
-        "default": "Xb7hHmjMSfVbjm9wJ5GT",  # Josh - Natural male
-        "calm": "XB0fDUnXU5powFXDhCwa",      # Adam - Calm male
-        "professional": "IKne3meq5aSn9XLyDdC",  # Antoni - Professional
-        "warm": "XB0fDUnXU5powFXDhCwa",      # Adam - Warm tone
+        "default": "21m00Tcm4TlvDq8ikWAM",  # Rachel - Natural female
+        "calm": "AZnzlk1XvdvUeBnXmlld",     # Emily - Calm female  
+        "professional": "TxGEqnHWrfWFTfGW9XjX", # Josh - Professional male
+        "warm": "XB0fDUnXU5powFXDhCwa",      # Bella - Warm female
+        "male": "pNInz6obpgDQGcFmaJgB",     # Adam - Male voice
+        "custom": "21m00Tcm4TlvDq8ikWAM",   # Default fallback
     }
     
     def __init__(
@@ -82,8 +83,12 @@ class ElevenLabsSpeechController:
         self.model_id = model_id
         
         # ElevenLabs client
-        self.client: Optional[ElevenLabsClient] = None
-        self._init_client()
+        self.client = None
+        if self.api_key:
+            try:
+                self.client = ElevenLabs(api_key=self.api_key)
+            except Exception as e:
+                print(f"[elevenlabs] Error creating client: {e}")
         
         # Speech queues
         self._critical_queue: queue.Queue[str] = queue.Queue()
@@ -128,7 +133,7 @@ class ElevenLabsSpeechController:
         self._thread.start()
         print("[elevenlabs] Speech controller started")
         
-        if not self.client and self.fallback_to_system:
+        if not self.api_key and self.fallback_to_system:
             print("[elevenlabs] Using fallback system TTS")
     
     def stop(self) -> None:
@@ -161,7 +166,8 @@ class ElevenLabsSpeechController:
         message: str,
         alert_type: AlertType = AlertType.INFO,
         priority: int = 50,
-        formatted: bool = False
+        formatted: bool = False,
+        immediate: bool = False
     ) -> bool:
         """Queue a message for speaking."""
         if self._stop.is_set():
@@ -171,15 +177,15 @@ class ElevenLabsSpeechController:
             message = self.ui.format_message_for_user(message)
         
         # Check if we should speak
-        force = alert_type == AlertType.CRITICAL or priority >= 90
+        force = alert_type == AlertType.CRITICAL or priority >= 90 or immediate
         if not self.ui.should_speak(message, alert_type, priority, force):
             self._messages_suppressed += 1
             return False
         
-        # Queue based on priority
-        if alert_type == AlertType.CRITICAL or priority >= 90:
-            self._critical_queue.put(message)
+        # For immediate speech, clear lower priority queues
+        if immediate or alert_type == AlertType.CRITICAL or priority >= 90:
             self._drain_lower_priority_queues()
+            self._critical_queue.put(message)
         elif alert_type == AlertType.WARNING or priority >= 70:
             self._urgent_queue.put(message)
         elif alert_type == AlertType.GUIDANCE:
@@ -189,21 +195,21 @@ class ElevenLabsSpeechController:
         
         return True
     
-    def speak_critical(self, message: str) -> bool:
+    def speak_critical(self, message: str, immediate: bool = True) -> bool:
         """Speak a critical safety alert."""
-        return self.speak(message, AlertType.CRITICAL, priority=100)
+        return self.speak(message, AlertType.CRITICAL, priority=100, immediate=immediate)
     
-    def speak_warning(self, message: str) -> bool:
+    def speak_warning(self, message: str, immediate: bool = False) -> bool:
         """Speak a warning alert."""
-        return self.speak(message, AlertType.WARNING, priority=80)
+        return self.speak(message, AlertType.WARNING, priority=80, immediate=immediate)
     
-    def speak_guidance(self, message: str) -> bool:
+    def speak_guidance(self, message: str, immediate: bool = False) -> bool:
         """Speak navigation guidance."""
-        return self.speak(message, AlertType.GUIDANCE, priority=60)
+        return self.speak(message, AlertType.GUIDANCE, priority=60, immediate=immediate)
     
-    def speak_info(self, message: str) -> bool:
+    def speak_info(self, message: str, immediate: bool = False) -> bool:
         """Speak general information."""
-        return self.speak(message, AlertType.INFO, priority=30)
+        return self.speak(message, AlertType.INFO, priority=30, immediate=immediate)
     
     def _drain_lower_priority_queues(self) -> None:
         """Clear normal and info queues when critical alert arrives."""
@@ -231,14 +237,14 @@ class ElevenLabsSpeechController:
             pass
         
         try:
-            msg = self._normal_queue.get(timeout=0.5)
+            msg = self._normal_queue.get_nowait()
             if msg:
                 return (msg, AlertType.GUIDANCE)
         except queue.Empty:
             pass
         
         try:
-            msg = self._info_queue.get(timeout=0.3)
+            msg = self._info_queue.get_nowait()
             if msg:
                 return (msg, AlertType.INFO)
         except queue.Empty:
@@ -254,8 +260,8 @@ class ElevenLabsSpeechController:
         try:
             self._api_calls += 1
             
-            # Generate audio
-            audio_stream = self.client.text_to_speech.convert_as_stream(
+            # Generate audio using ElevenLabs
+            audio_stream = self.client.text_to_speech.convert(
                 text=message,
                 voice_id=self.voice_id,
                 model_id=self.model_id,
@@ -284,16 +290,34 @@ class ElevenLabsSpeechController:
             return
         
         try:
+            # Stop any existing playback
+            sd.stop()
+            
             # Load audio from bytes
             audio_buffer = io.BytesIO(audio_data)
             data, samplerate = sf.read(audio_buffer)
             
-            # Play
+            # Use default device to avoid conflicts
+            sd.default.device = None
+            
+            # Play with shorter timeout to avoid hanging
             sd.play(data, samplerate)
-            sd.wait()
+            
+            # Wait for playback with timeout
+            start_time = time.time()
+            while sd.get_stream().active:
+                if time.time() - start_time > 10:  # 10 second timeout
+                    sd.stop()
+                    break
+                time.sleep(0.1)
             
         except Exception as e:
-            print(f"[elevenlabs] Audio playback error: {e}")
+            # Suppress common macOS audio errors
+            if "Unknown Error" not in str(e) and "err='-50'" not in str(e):
+                print(f"[elevenlabs] Audio playback error: {e}")
+            else:
+                # Common macOS audio error - suppress for cleaner output
+                pass
     
     def _speak_with_fallback(self, message: str) -> bool:
         """Fallback to system TTS (pyttsx3)."""
@@ -327,7 +351,7 @@ class ElevenLabsSpeechController:
             
             # Try ElevenLabs first, then fallback
             success = False
-            if self.client:
+            if self.api_key:
                 success = self._speak_with_elevenlabs(message)
             
             if not success and self.fallback_to_system:
@@ -335,8 +359,6 @@ class ElevenLabsSpeechController:
             
             if success:
                 self._messages_spoken += 1
-            
-            time.sleep(0.1)
     
     def recognize_speech(
         self,
@@ -434,7 +456,7 @@ class ElevenLabsSpeechController:
             "api_calls": self._api_calls,
             "api_errors": self._api_errors,
             "elevenlabs_available": self.client is not None,
-            "using_fallback": self.client is None and self.fallback_to_system,
+            "using_fallback": (self.client is None or self.api_key is None) and self.fallback_to_system,
             "queues": {
                 "critical": self._critical_queue.qsize(),
                 "urgent": self._urgent_queue.qsize(),
@@ -471,8 +493,12 @@ def create_elevenlabs_controller(
         Configured ElevenLabsSpeechController
     """
     voice_id = ElevenLabsSpeechController.DEFAULT_VOICES.get(voice, voice)
+    
+    # Remove voice_id from kwargs if present to avoid conflict
+    kwargs_clean = {k: v for k, v in kwargs.items() if k != 'voice_id'}
+    
     return ElevenLabsSpeechController(
         api_key=api_key,
         voice_id=voice_id,
-        **kwargs
+        **kwargs_clean
     )

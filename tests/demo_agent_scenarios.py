@@ -309,59 +309,8 @@ def main():
         decision,
     )
 
-    # ----------------------------------------------------------------
-    # 11. IndoorNavigationAgent: Chair blocking hallway path
-    # ----------------------------------------------------------------
-    router = AgenticNavigationRouter()
-    decision = router.decide(_ctx(
-        detections=[
-            Detection(label="chair", confidence=0.82, distance_m=2.0, direction=Direction.CENTER),
-        ],
-        route=RouteState(active=True, destination="meeting room", next_instruction="Walk straight"),
-        scene=SceneState(location_type="hallway", visual_confidence=0.9),
-    ))
-    _print_decision(
-        "11. INDOOR NAVIGATION AGENT — Chair blocking hallway",
-        "Walking down a hallway toward meeting room. Chair 2m ahead blocks the path.",
-        decision,
-    )
-
-    # ----------------------------------------------------------------
-    # 12. IndoorNavigationAgent: Table very close, urgent avoidance
-    # ----------------------------------------------------------------
-    router = AgenticNavigationRouter()
-    decision = router.decide(_ctx(
-        detections=[
-            Detection(label="dining table", confidence=0.78, distance_m=0.8, direction=Direction.SLIGHT_LEFT),
-        ],
-        scene=SceneState(location_type="room", visual_confidence=0.85),
-    ))
-    _print_decision(
-        "12. INDOOR NAVIGATION AGENT — Table very close",
-        "In a room. Dining table 0.8m to the slight left. Urgent avoidance needed.",
-        decision,
-    )
-
-    # ----------------------------------------------------------------
-    # 13. IndoorNavigationAgent: Multiple obstacles in corridor
-    # ----------------------------------------------------------------
-    router = AgenticNavigationRouter()
-    decision = router.decide(_ctx(
-        detections=[
-            Detection(label="chair", confidence=0.75, distance_m=1.5, direction=Direction.CENTER),
-            Detection(label="bench", confidence=0.68, distance_m=2.8, direction=Direction.SLIGHT_RIGHT),
-        ],
-        route=RouteState(active=True, destination="elevator", next_instruction="Continue forward"),
-        scene=SceneState(location_type="corridor", visual_confidence=0.9),
-    ))
-    _print_decision(
-        "13. INDOOR NAVIGATION AGENT — Multiple obstacles in corridor",
-        "Walking to elevator. Chair 1.5m center + bench 2.8m slight right both blocking.",
-        decision,
-    )
-
     print("=" * 70)
-    print("  DEMO COMPLETE — All 8 agents demonstrated (13 scenarios)")
+    print("  DEMO COMPLETE — All 7 agents demonstrated")
     print("=" * 70)
 
 

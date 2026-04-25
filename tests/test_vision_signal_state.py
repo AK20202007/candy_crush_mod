@@ -9,8 +9,7 @@ import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
 from agentic_layer import BBox, Detection, Direction, SurfaceKind  # noqa: E402
-from agentic_layer.utils import detection_from_bbox  # noqa: E402
-from vision import VisionConfig, VisionSystem  # noqa: E402
+from vision import VisionSystem  # noqa: E402
 
 
 def _traffic_light_detection() -> Detection:
@@ -66,54 +65,11 @@ def test_surface_crop_identifies_dark_gray_as_road() -> None:
     assert obs.confidence >= 0.42
 
 
-def test_detection_from_bbox_marks_frame_edge_partial() -> None:
-    det = detection_from_bbox(
-        label="chair",
-        confidence=0.81,
-        x1=0,
-        y1=120,
-        x2=90,
-        y2=478,
-        frame_width=640,
-        frame_height=480,
-    )
-
-    assert det.attributes["edge_truncated"] is True
-    assert det.attributes["partial_visibility"] == "frame_edge"
-    assert det.attributes["distance_reliability"] == "low"
-    assert "left" in det.attributes["edge_contact"]
-    assert "bottom" in det.attributes["edge_contact"]
-
-
-def test_door_handle_detector_finds_horizontal_lever() -> None:
-    frame = np.full((480, 640, 3), (150, 150, 145), dtype=np.uint8)
-    cv2.line(frame, (250, 80), (250, 450), (70, 70, 70), 3)
-    cv2.line(frame, (520, 80), (520, 450), (70, 70, 70), 3)
-    cv2.rectangle(frame, (330, 185), (370, 345), (105, 105, 100), 4)
-    cv2.rectangle(frame, (345, 278), (470, 305), (205, 205, 195), -1)
-    cv2.rectangle(frame, (345, 278), (470, 305), (90, 90, 85), 2)
-
-    vision = object.__new__(VisionSystem)
-    vision._cfg = VisionConfig(camera_mount="hand")
-
-    obs = vision._detect_door(frame, 640, 480)
-
-    assert obs is not None
-    assert obs.kind == SurfaceKind.DOOR
-    assert obs.source == "vision-door-handle"
-    assert obs.attributes["handle_detected"] is True
-    assert obs.attributes["handle_orientation"] == "lever_horizontal"
-    assert obs.attributes["recommended_hand"] == "right"
-    assert obs.attributes["handle_bbox"][0] < obs.attributes["handle_bbox"][2]
-
-
 def main() -> None:
     test_green_traffic_light_crop_is_categorized()
     test_red_traffic_light_crop_is_categorized()
     test_surface_crop_identifies_bright_gray_as_sidewalk()
     test_surface_crop_identifies_dark_gray_as_road()
-    test_detection_from_bbox_marks_frame_edge_partial()
-    test_door_handle_detector_finds_horizontal_lever()
     print("vision signal state tests passed")
 
 

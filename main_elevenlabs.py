@@ -395,6 +395,34 @@ Setup:
         default=DEFAULT_PROFILE_NAME,
         help="Detection profile"
     )
+    vision_group.add_argument(
+        "--conf",
+        type=float,
+        default=None,
+        help="Detection confidence threshold"
+    )
+    vision_group.add_argument(
+        "--iou",
+        type=float,
+        default=None,
+        help="NMS IoU threshold"
+    )
+    vision_group.add_argument(
+        "--imgsz",
+        type=int,
+        default=None,
+        help="Inference image size"
+    )
+    vision_group.add_argument(
+        "--no-half",
+        action="store_true",
+        help="Disable half-precision inference"
+    )
+    vision_group.add_argument(
+        "--augment",
+        action="store_true",
+        help="Enable test-time augmentation"
+    )
     
     return parser
 
