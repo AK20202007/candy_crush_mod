@@ -13,18 +13,32 @@ from __future__ import annotations
 
 import json
 import os
+import ssl
 import urllib.error
 import urllib.request
 from typing import Optional, Tuple
 from urllib.parse import quote
 
+# macOS Python often lacks root certificates — use unverified context for geocoding
+_SSL_CTX = ssl._create_unverified_context()
+
 
 GOOGLE_PLACES_TEXTSEARCH = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 GOOGLE_GEOCODE = "https://maps.googleapis.com/maps/api/geocode/json"
+ORS_GEOCODE = "https://api.openrouteservice.org/geocode/search"
+
+ORS_API_KEY = "eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImQ4ODJkOGM4MGViNTRkODU5NDdjYTljMjI3MTkwMDkxIiwiaCI6Im11cm11cjY0In0="
+
+
+GOOGLE_MAPS_KEY = "AIzaSyCaKUj75iDUS8tM6yxIGi5IJJMtPZqrUDo"
 
 
 def _get_google_key() -> Optional[str]:
-    return (os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip() or None
+    return (os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip() or GOOGLE_MAPS_KEY
+
+
+def _get_ors_key() -> str:
+    return (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip() or ORS_API_KEY
 
 
 def search_destination(
@@ -33,28 +47,32 @@ def search_destination(
     timeout_s: float = 10.0,
 ) -> Optional[dict]:
     """
-    Search Google Maps for a destination.
+    Search for a destination using available APIs.
 
+    Priority: Google Places -> Google Geocoding -> ORS Geocoding -> raw query
     Returns dict with keys: name, address, lat, lng
-    or None if nothing found / no API key.
     """
-    key = api_key or _get_google_key()
-    if not key:
-        # No API key — return the raw query as-is
-        return {"name": query, "address": "", "lat": None, "lng": None}
+    google_key = api_key or _get_google_key()
+    
+    # Try Google Places first (richest results)
+    if google_key:
+        result = _places_text_search(google_key, query, timeout_s)
+        if result:
+            return result
+        # Try Google Geocoding
+        result = _geocode_search(google_key, query, timeout_s)
+        if result:
+            return result
 
-    # Try Places Text Search first (richer results)
-    result = _places_text_search(key, query, timeout_s)
-    if result:
-        return result
+    # Try OpenRouteService geocoding
+    ors_key = _get_ors_key()
+    if ors_key:
+        result = _ors_geocode_search(ors_key, query, timeout_s)
+        if result:
+            return result
 
-    # Fallback to Geocoding API
-    result = _geocode_search(key, query, timeout_s)
-    if result:
-        return result
-
-    # Nothing found
-    return None
+    # No API worked — return the raw query as-is
+    return {"name": query, "address": "", "lat": None, "lng": None}
 
 
 def _places_text_search(api_key: str, query: str, timeout_s: float) -> Optional[dict]:
@@ -65,7 +83,7 @@ def _places_text_search(api_key: str, query: str, timeout_s: float) -> Optional[
 
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json"}, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_s, context=_SSL_CTX) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
         print(f"[destination] Places API error: {e}")
@@ -96,7 +114,7 @@ def _geocode_search(api_key: str, query: str, timeout_s: float) -> Optional[dict
 
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json"}, method="GET")
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        with urllib.request.urlopen(req, timeout=timeout_s, context=_SSL_CTX) as resp:
             data = json.loads(resp.read().decode())
     except Exception as e:
         print(f"[destination] Geocoding API error: {e}")
@@ -117,6 +135,40 @@ def _geocode_search(api_key: str, query: str, timeout_s: float) -> Optional[dict
         "lat": loc.get("lat"),
         "lng": loc.get("lng"),
     }
+
+
+def _ors_geocode_search(api_key: str, query: str, timeout_s: float) -> Optional[dict]:
+    """Search using OpenRouteService Geocoding API."""
+    q = quote(query.strip(), safe="")
+    url = f"{ORS_GEOCODE}?text={q}&size=1"
+
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"Authorization": api_key, "Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=timeout_s, context=_SSL_CTX) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        print(f"[destination] ORS geocoding error: {e}")
+        return None
+
+    feats = data.get("features") or []
+    if not feats:
+        return None
+
+    best = feats[0]
+    props = best.get("properties") or {}
+    geom = best.get("geometry") or {}
+    coords = geom.get("coordinates") or []
+
+    name = props.get("name") or props.get("label") or query
+    address = props.get("label") or ""
+    lat = coords[1] if len(coords) >= 2 else None
+    lng = coords[0] if len(coords) >= 2 else None
+
+    return {"name": name, "address": address, "lat": lat, "lng": lng}
 
 
 def format_confirmation_message(result: dict) -> str:
