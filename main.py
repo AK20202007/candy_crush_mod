@@ -35,7 +35,7 @@ from speech_controller import IntelligentSpeechController
 from user_interface import UserMode, UserPreferences
 from vision import VisionConfig, VisionSystem
 
-from destination_verifier import search_destination, format_confirmation_message, get_text_confirmation
+from destination_verifier import search_destination, format_confirmation_message, get_voice_confirmation
 
 # Try to import optional components
 try:
@@ -239,8 +239,8 @@ class NavigationApp:
             self.interface.speak_info(confirm_msg)
             time.sleep(4)  # Let TTS finish before prompting input
         
-        # Wait for confirmation
-        confirmed = get_text_confirmation()
+        # Wait for voice confirmation
+        confirmed = get_voice_confirmation()
         
         if confirmed:
             verified_name = result.get("name", raw_destination)

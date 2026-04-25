@@ -190,3 +190,48 @@ def get_text_confirmation() -> bool:
         return response in ("yes", "y", "yeah", "yep", "correct", "confirm", "ok")
     except (EOFError, KeyboardInterrupt):
         return False
+
+
+def get_voice_confirmation(timeout: float = 5.0) -> bool:
+    """
+    Listen for a spoken 'yes' or 'no' via the microphone.
+    Falls back to text input if voice recognition is unavailable.
+    """
+    try:
+        import speech_recognition as sr
+    except ImportError:
+        print("[system] Speech recognition not available, using text input")
+        return get_text_confirmation()
+
+    recognizer = sr.Recognizer()
+    recognizer.energy_threshold = 300
+    recognizer.dynamic_energy_threshold = True
+
+    try:
+        with sr.Microphone() as source:
+            print("\n[system] Say 'yes' to confirm or 'no' to change destination...")
+            recognizer.adjust_for_ambient_noise(source, duration=0.5)
+            audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=3)
+
+        # Use Google's free speech recognition
+        text = recognizer.recognize_google(audio).strip().lower()
+        print(f"[system] Heard: '{text}'")
+
+        yes_words = {"yes", "yeah", "yep", "correct", "confirm", "ok", "okay", "sure", "right", "affirmative"}
+        no_words = {"no", "nope", "nah", "wrong", "incorrect", "change", "cancel"}
+
+        for word in yes_words:
+            if word in text:
+                return True
+        for word in no_words:
+            if word in text:
+                return False
+
+        # Couldn't determine — ask again via text
+        print(f"[system] Didn't catch that. Falling back to text input.")
+        return get_text_confirmation()
+
+    except Exception as e:
+        print(f"[system] Voice recognition error: {e}")
+        print("[system] Falling back to text input")
+        return get_text_confirmation()
