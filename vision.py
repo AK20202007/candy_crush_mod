@@ -14,6 +14,7 @@ optional TTA, FP16 on CUDA) and stabilize warnings across frames.
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
@@ -62,53 +63,8 @@ class VisionConfig:
     max_det: int = 50
 
     # Seizure / Fall Detection
-    strobe_freq: float = 3.0
-    strobe_window_s: float = 5.0
     elevation_threshold: float = 40.0
     emergency_contact: str = "Emergency Contact"
-
-
-
-class BrightnessMonitor:
-    """Tracks frame brightness to detect rapid flickering (strobe lights)."""
-
-    def __init__(self, window_size: int = 30, freq_threshold: float = 3.0, fps: float = 30.0):
-        self._history: List[float] = []
-        self._window_size = window_size
-        self._freq_threshold = freq_threshold
-        self._fps = fps
-        self._last_strobe_time = 0.0
-
-    def update(self, frame: np.ndarray) -> bool:
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        brightness = float(np.mean(gray))
-        self._history.append(brightness)
-        if len(self._history) > self._window_size:
-            self._history.pop(0)
-
-        if len(self._history) < self._window_size:
-            return False
-
-        avg = float(np.mean(self._history))
-        std = float(np.std(self._history))
-        if std < 15:  # Minimum variance to avoid noise
-            return False
-
-        crossings = 0
-        for i in range(1, len(self._history)):
-            if (self._history[i - 1] < avg and self._history[i] >= avg) or (
-                self._history[i - 1] > avg and self._history[i] <= avg
-            ):
-                crossings += 1
-
-        freq = crossings / (2 * (self._window_size / self._fps))
-        if freq >= self._freq_threshold:
-            self._last_strobe_time = time.time()
-            return True
-        return False
-
-    def is_strobe_recent(self, window_s: float = 5.0) -> bool:
-        return (time.time() - self._last_strobe_time) < window_s
 
 
 class FallDetector:
@@ -176,12 +132,13 @@ class FallDetector:
 class MotionFallDetector:
     """Uses Apple's CoreMotion (CMAltimeter) to detect rapid altitude drops."""
 
-    def __init__(self, drop_threshold: float = -1.5):
+    def __init__(self, drop_threshold: float = -1.37): # 4.5 feet is roughly 1.37 meters
         self._altimeter = None
         self._drop_threshold = drop_threshold
-        self._last_altitude = 0.0
         self._is_available = False
         self._fall_detected = False
+        self._history = deque() # tuples of (timestamp, altitude)
+        self._fall_candidate_time = None
 
         if HAS_CORE_MOTION:
             try:
@@ -201,14 +158,27 @@ class MotionFallDetector:
         def _handler(data, error):
             if error:
                 return
-            # relativeAltitude is in meters
-            alt = data.relativeAltitude().floatValue()
-            diff = alt - self._last_altitude
-            self._last_altitude = alt
             
-            if diff < self._drop_threshold:
-                self._fall_detected = True
-                callback(diff)
+            now = time.time()
+            alt = data.relativeAltitude().floatValue()
+            
+            self._history.append((now, alt))
+            # Keep a 5-second rolling window to find max altitude before the fall
+            while self._history and now - self._history[0][0] > 5.0:
+                self._history.popleft()
+                
+            max_recent_alt = max(a for _, a in self._history)
+            diff = alt - max_recent_alt # typically negative during a drop
+            
+            if diff <= self._drop_threshold:
+                if self._fall_candidate_time is None:
+                    self._fall_candidate_time = now
+                elif now - self._fall_candidate_time >= 20.0:
+                    if not self._fall_detected:
+                        self._fall_detected = True
+                        callback(diff)
+            else:
+                self._fall_candidate_time = None
 
         self._altimeter.startRelativeAltitudeUpdatesToQueue_withHandler_(queue, _handler)
 
@@ -217,6 +187,7 @@ class MotionFallDetector:
 
     def reset(self):
         self._fall_detected = False
+        self._fall_candidate_time = None
 
 
 class SignalMagnitudeFallDetector:
@@ -311,7 +282,6 @@ class VisionSystem:
         self._consec_obstacle: int = 0
         self._stuck_start_time: Optional[float] = None
 
-        self._brightness_monitor = BrightnessMonitor(freq_threshold=self._cfg.strobe_freq)
         self._fall_detector = FallDetector(threshold=self._cfg.elevation_threshold)
         self._motion_fall_detector = MotionFallDetector()
         self._smv_fall_detector = SignalMagnitudeFallDetector()
@@ -395,12 +365,6 @@ class VisionSystem:
             cv2.destroyAllWindows()
 
     def _process_frame(self, frame: np.ndarray, w: int, h: int) -> None:
-        # Seizure Detection: Monitor for rapid brightness changes (strobe lights).
-        if self._brightness_monitor.update(frame):
-            # Only trigger a warning for the user, not an emergency call.
-            if self._maybe_warn("WARNING: STROBE LIGHT DETECTED. PLEASE BE CAREFUL."):
-                print("[vision] STROBE WARNING")
-
         # Fall Detection (Vision-based): Monitor for sudden drops or large camera motion.
         fall_state = self._fall_detector.update(frame)
         if fall_state == "WARNING":

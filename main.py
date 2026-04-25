@@ -74,12 +74,6 @@ def main() -> None:
         help="OpenCV camera index (default: 0).",
     )
     parser.add_argument(
-        "--strobe-freq",
-        type=float,
-        default=3.0,
-        help="Minimum frequency (Hz) to trigger strobe warning (default: 3.0).",
-    )
-    parser.add_argument(
         "--model",
         type=str,
         default="yolov8n.pt",
@@ -198,7 +192,6 @@ def main() -> None:
 
     vcfg = VisionConfig(
         model_path=args.model,
-        strobe_freq=args.strobe_freq,
         emergency_contact=args.emergency_contact,
         # We can keep vision-based fall detection active as a supplement
         confirm_frames=2,
