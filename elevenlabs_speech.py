@@ -78,7 +78,7 @@ class ElevenLabsSpeechController:
         self.fallback_to_system = fallback_to_system
         
         # API configuration
-        self.api_key = api_key or os.getenv("ELEVENLABS_API_KEY")
+        self.api_key = api_key or os.getenv("ELEVENLABS_API_KEY") or "sk_b7ad54c02663e087df7e214908660e306cc0f1604ccc750c"
         self.voice_id = voice_id or self.DEFAULT_VOICES["default"]
         self.model_id = model_id
         
@@ -121,7 +121,7 @@ class ElevenLabsSpeechController:
             return False
         
         try:
-            self.client = ElevenLabsClient(api_key=self.api_key)
+            self.client = ElevenLabs(api_key=self.api_key)
             print("[elevenlabs] Client initialized successfully")
             return True
         except Exception as e:
@@ -359,6 +359,8 @@ class ElevenLabsSpeechController:
             
             if success:
                 self._messages_spoken += 1
+                # Clear backlog to ensure real-time response
+                self.clear_queues()
     
     def recognize_speech(
         self,

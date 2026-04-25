@@ -30,7 +30,6 @@ from typing import Optional
 # Import our improved components
 from agentic_layer import AgenticNavigationRouter
 from agentic_layer.config import DEFAULT_PROFILE_NAME, load_profiles
-from elevenlabs_speech import ElevenLabsSpeechController, create_elevenlabs_controller
 from navigation_interface import NavigationInterface
 from speech_controller import IntelligentSpeechController
 from user_interface import UserMode, UserPreferences
@@ -133,6 +132,7 @@ class NavigationApp:
                 iou=args.iou or 0.5,
                 augment=args.augment,
                 half=not args.no_half,
+                camera_mount=args.camera_mount
             )
             
             def handle_decision(decision):
@@ -151,6 +151,10 @@ class NavigationApp:
                 config=vision_config,
                 on_decision=handle_decision,
             )
+            
+            # Start hardware sensor listeners if available
+            self.vision._motion_fall_detector.start(lambda d: self.vision.handle_sensor_fall(f"DRAMATIC elevation change of {d:.1f}m", priority=99))
+            self.vision._smv_fall_detector.start(lambda s, x, y: self.vision.handle_sensor_fall(f"Impact force of {s:.1f} m/s^2", priority=10))
             
             # Start the interface
             self.interface.start()
@@ -194,10 +198,7 @@ class NavigationApp:
                     timeout_s=args.voice_timeout,
                     locale=args.voice_locale
                 )
-                destination = capture_destination_by_voice(
-                    speak=lambda msg: self.interface.speak_info(msg),
-                    config=config
-                )
+                destination = capture_destination_by_voice(config)
                 return destination
             except VoiceInputError as e:
                 print(f"[system] Voice input failed: {e}")
@@ -237,11 +238,15 @@ class NavigationApp:
                 print("[system] Press Ctrl+C to stop, or say 'stop'")
                 
                 try:
-                    self.vision.run_forever(
+                    frames = self.vision.run_forever(
                         camera_index=args.camera,
                         stop_event=self.stop_event
                     )
+                    if frames:
+                        self._frames_processed += frames
                 except KeyboardInterrupt:
+                    # In case it bubbled up, we still want to save what we got
+                    # But run_forever now returns the count even on interrupt
                     print("\n[system] Interrupted by user")
                     break
                 
@@ -395,6 +400,13 @@ Examples:
         "--augment",
         action="store_true",
         help="Enable test-time augmentation"
+    )
+    vision_group.add_argument(
+        "--camera-mount",
+        type=str,
+        default="hand",
+        choices=["head", "hand"],
+        help="Camera mount position: 'head' for glasses/head-mounted, 'hand' for phone (default: hand)."
     )
     
     return parser

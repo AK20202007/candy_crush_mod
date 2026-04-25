@@ -25,7 +25,7 @@ class AgenticProfile:
     distance_scale: float = 1.0
     visual_confidence: float = 0.75
     location_type: str = "unknown"
-    agent_repeat_ms: int = 4500
+    agent_repeat_ms: int = 2500
     agent_urgent_repeat_ms: int = 1000
 
     @classmethod

@@ -224,22 +224,19 @@ class IntelligentSpeechController:
                 continue
             
             try:
-                # Stop any current speech for critical/warning alerts
-                if alert_type in [AlertType.CRITICAL, AlertType.WARNING]:
-                    try:
-                        engine.stop()
-                    except:
-                        pass
-                
                 # Speak the message
                 self._current_message = message
                 self._speaking_start_time = time.time()
                 
-                engine.say(message)
+                time.sleep(0.1)  # Brief pause before speaking
+                engine.say(message + " ")
                 engine.runAndWait()
+                time.sleep(0.2)  # Wait for hardware to finish audio buffer
                 
                 self._messages_spoken += 1
                 self._last_message_type = alert_type
+                # Clear backlog to ensure real-time response
+                self.clear_queues()
                 
                 # Brief pause between messages
                 time.sleep(0.1)
