@@ -35,6 +35,8 @@ from speech_controller import IntelligentSpeechController
 from user_interface import UserMode, UserPreferences
 from vision import VisionConfig, VisionSystem
 
+from destination_verifier import search_destination, format_confirmation_message, get_text_confirmation
+
 # Try to import optional components
 try:
     from voice_input import DestinationCaptureConfig, VoiceInputError, capture_destination_by_voice
@@ -209,6 +211,50 @@ class NavigationApp:
                     voice_timeout=args.voice_timeout,
                     voice_locale=args.voice_locale
                 ))
+
+    def verify_destination(self, raw_destination: str) -> Optional[str]:
+        """
+        Look up the destination on Google Maps, announce it via audio,
+        and wait for the user to confirm before proceeding.
+        
+        Returns the verified destination name, or None if rejected.
+        """
+        print(f"[system] Looking up '{raw_destination}' on Google Maps...")
+        
+        result = search_destination(raw_destination)
+        
+        if result is None:
+            msg = f"Sorry, I could not find {raw_destination} on the map. Please try again."
+            print(f"[system] {msg}")
+            if self.interface:
+                self.interface.speak_warning(msg)
+                time.sleep(3)  # Let TTS finish
+            return None
+        
+        # Announce what we found
+        confirm_msg = format_confirmation_message(result)
+        print(f"[system] {confirm_msg}")
+        
+        if self.interface:
+            self.interface.speak_info(confirm_msg)
+            time.sleep(4)  # Let TTS finish before prompting input
+        
+        # Wait for confirmation
+        confirmed = get_text_confirmation()
+        
+        if confirmed:
+            verified_name = result.get("name", raw_destination)
+            print(f"[system] Destination confirmed: {verified_name}")
+            if self.interface:
+                self.interface.speak_info(f"Great. Starting navigation to {verified_name}.")
+                time.sleep(2)
+            return verified_name
+        else:
+            print("[system] Destination rejected. Please enter a new one.")
+            if self.interface:
+                self.interface.speak_info("OK, please enter a different destination.")
+                time.sleep(2)
+            return None
     
     def run(self, args) -> int:
         """Main application loop."""
@@ -222,18 +268,38 @@ class NavigationApp:
         try:
             # Main loop
             while not self.stop_event.is_set():
-                # Get destination
-                destination = self.get_destination(args)
+                # Get raw destination input
+                raw_destination = self.get_destination(args)
                 
-                if destination is None:
+                if raw_destination is None:
                     print("[system] No destination provided, exiting")
                     break
                 
-                # Set destination and start navigation
-                print(f"\n[system] Starting navigation to: {destination}")
-                self.interface.set_destination(destination)
+                # Verify destination via Google Maps + audio confirmation
+                # Keep asking until user confirms or quits
+                verified_destination = None
+                while verified_destination is None and not self.stop_event.is_set():
+                    verified_destination = self.verify_destination(raw_destination)
+                    if verified_destination is None:
+                        # Ask for a new destination
+                        raw_destination = self.get_destination(argparse.Namespace(
+                            destination=None,
+                            typed_destination=True,
+                            voice_timeout=getattr(args, 'voice_timeout', 8.0),
+                            voice_locale=getattr(args, 'voice_locale', 'en_US')
+                        ))
+                        if raw_destination is None:
+                            break
                 
-                # Run vision system
+                if verified_destination is None:
+                    print("[system] No destination confirmed, exiting")
+                    break
+                
+                # NOW start navigation with the confirmed destination
+                print(f"\n[system] Starting navigation to: {verified_destination}")
+                self.interface.set_destination(verified_destination)
+                
+                # Run vision system (obstacle detection starts HERE, not before)
                 print("[system] Starting vision system...")
                 print("[system] Press Ctrl+C to stop, or say 'stop'")
                 
@@ -245,8 +311,6 @@ class NavigationApp:
                     if frames:
                         self._frames_processed += frames
                 except KeyboardInterrupt:
-                    # In case it bubbled up, we still want to save what we got
-                    # But run_forever now returns the count even on interrupt
                     print("\n[system] Interrupted by user")
                     break
                 
