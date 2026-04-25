@@ -25,8 +25,8 @@ class SpeechController:
 
     def __init__(self) -> None:
         self._normal: queue.Queue[str] = queue.Queue()
-        self._urgent_pending = False
-        self._urgent_message: Optional[str] = None
+        # PriorityQueue for errors/urgent messages. Lower number = higher priority.
+        self._urgent: queue.PriorityQueue[tuple[int, float, str]] = queue.PriorityQueue()
         self._urgent_lock = threading.Lock()
 
         self._stop = threading.Event()
@@ -41,17 +41,16 @@ class SpeechController:
         self._stop.set()
         self._normal.put_nowait("")  # unblock queue.get if needed
 
-    def speak_urgent(self, message: str) -> None:
-        """Queue a high-priority safety message (latest wins if several arrive quickly)."""
+    def speak_urgent(self, message: str, priority: int = 10) -> None:
+        """Queue a high-priority safety message. Lower priority number wins."""
         with self._urgent_lock:
-            self._urgent_message = message
-            self._urgent_pending = True
+            # Use timestamp to maintain FIFO ordering for items with the same priority
+            self._urgent.put((priority, time.time(), message))
 
     def speak_emergency(self, message: str) -> None:
-        """Queue a critical emergency message that repeats many times."""
-        # For simplicity in this prototype, we'll just repeat the message in the queue.
+        """Queue a critical emergency message that repeats many times (Highest Priority 0)."""
         for _ in range(10):
-            self.speak_urgent(message)
+            self.speak_urgent(message, priority=0)
 
     def speak_normal(self, message: str) -> None:
         """Queue a navigation-style message."""
@@ -62,8 +61,8 @@ class SpeechController:
     def _drain_normal_if_urgent(self) -> None:
         """Drop pending navigation lines when a warning must take priority."""
         with self._urgent_lock:
-            urgent = self._urgent_pending
-        if not urgent:
+            has_urgent = not self._urgent.empty()
+        if not has_urgent:
             return
         try:
             while True:
@@ -73,11 +72,9 @@ class SpeechController:
 
     def _pop_urgent(self) -> Optional[str]:
         with self._urgent_lock:
-            if not self._urgent_pending:
+            if self._urgent.empty():
                 return None
-            msg = self._urgent_message
-            self._urgent_pending = False
-            self._urgent_message = None
+            _, _, msg = self._urgent.get_nowait()
             return msg
 
     def _worker(self) -> None:

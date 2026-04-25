@@ -191,9 +191,9 @@ def main() -> None:
     stop_event = threading.Event()
     location_store = LiveLocationStore()
 
-    def alert_callback(msg: str) -> None:
+    def alert_callback(msg: str, priority: int = 10) -> None:
         # We only speak critical warnings now.
-        speech.speak_urgent(msg)
+        speech.speak_urgent(msg, priority=priority)
         print(f"[ALERT] {msg}")
 
     vcfg = VisionConfig(
@@ -225,8 +225,8 @@ def main() -> None:
             pass
 
     # Start hardware sensor listeners if available
-    vision._motion_fall_detector.start(lambda d: vision.handle_sensor_fall(f"Altitude drop of {d:.1f}m"))
-    vision._smv_fall_detector.start(lambda s, x, y: vision.handle_sensor_fall(f"Impact force of {s:.1f} m/s^2"))
+    vision._motion_fall_detector.start(lambda d: vision.handle_sensor_fall(f"DRAMATIC elevation change of {d:.1f}m", priority=99))
+    vision._smv_fall_detector.start(lambda s, x, y: vision.handle_sensor_fall(f"Impact force of {s:.1f} m/s^2", priority=10))
 
     def nav_speak(msg: str) -> None:
         speech.speak_normal(msg)

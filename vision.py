@@ -279,7 +279,7 @@ class VisionSystem:
 
     def __init__(
         self,
-        on_warning: Callable[[str], None],
+        on_warning: Callable[[str, int], None],
         on_emergency: Callable[[str], None],
         config: Optional[VisionConfig] = None,
     ) -> None:
@@ -343,9 +343,9 @@ class VisionSystem:
         self._last_phrase_time[phrase] = now
         return True
 
-    def _maybe_warn(self, phrase: str) -> bool:
+    def _maybe_warn(self, phrase: str, priority: int = 10) -> bool:
         if self._cooldown_ok(phrase):
-            self._on_warning(phrase)
+            self._on_warning(phrase, priority)
             return True
         return False
 
@@ -545,9 +545,9 @@ class VisionSystem:
         if alarm_triggered:
             self.trigger_emergency("FALL CONFIRMED")
 
-    def handle_sensor_fall(self, reason: str) -> None:
+    def handle_sensor_fall(self, reason: str, priority: int = 10) -> None:
         """Triggered by hardware sensors; starts the warning/alarm cycle."""
         print(f"[vision] Sensor-based fall sensed: {reason}")
         self._fall_detector.trigger_mock_fall()
         # Give an immediate auditory cue that a fall was sensed.
-        self._maybe_warn("Fall detected. Starting 15-second countdown.")
+        self._maybe_warn("Fall detected. Starting 15-second countdown.", priority=priority)
