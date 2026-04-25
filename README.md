@@ -8,7 +8,7 @@ Minimal local demo: **webcam** + **YOLOv8** object detection + **spoken warnings
 - Watches for **person**, **chair**, **car**, and **door** if your model exposes a `door` class (standard COCO weights usually do **not** include door; the code still runs and tracks the other classes).
 - **Person near the center** of the frame → *"Watch out, person ahead"* (urgent speech).
 - **Chair / car / (door)** with a large bounding box (simulated closeness) → *"Obstacle ahead"* (urgent).
-- You type a **destination**; the app speaks **mock directions** every few seconds (normal-priority speech).
+- You type a **destination**; the app speaks **mock directions** by default, or **real turn-by-turn steps** if maps are configured.
 - Urgent warnings **skip queued** navigation lines so safety messages are not stuck behind a long backlog.
 
 ## Setup
@@ -48,6 +48,54 @@ python main.py --camera 0 --nav-interval 5
 
 - `--camera`: webcam index if you have multiple cameras.
 - `--nav-interval`: seconds between navigation phrases.
+- `--origin`: starting point as `longitude,latitude` (required for real map directions).
+- `--maps-provider`: `auto` (default), `google`, or `ors`.
+
+### Real map routing (Google Maps)
+
+1) Enable **Directions API** + **Geocoding API** in your Google Cloud project.
+2) Set your API key:
+
+```bash
+export GOOGLE_MAPS_API_KEY="your_google_key"
+```
+
+3) Run with an origin coordinate:
+
+```bash
+python3 main.py --origin=-122.1697,37.4275 --maps-provider=google
+```
+
+The app will geocode the destination you type, fetch walking directions, and speak each step.
+
+### Live progress mode (type coordinates)
+
+To advance each step only after you reach the maneuver location, enable live mode:
+
+```bash
+python3 main.py --origin=-122.1697,37.4275 --maps-provider=google --live-nav
+```
+
+Then type your current location in the terminal as:
+
+```text
+lat,lon
+```
+
+Example:
+
+```text
+37.427500,-122.169700
+```
+
+The app advances to the next instruction only after your typed location is close enough to the current maneuver endpoint (default `--arrival-radius-m 14`).
+
+### Real map routing (OpenRouteService)
+
+```bash
+export OPENROUTESERVICE_API_KEY="your_ors_key"
+python3 main.py --origin=-122.1697,37.4275 --maps-provider=ors
+```
 
 ### Detection quality (Ultralytics)
 
@@ -82,6 +130,6 @@ The app prints timestamps of navigation lines, urgent warnings, and vision statu
 
 ## Limitations (prototype)
 
-- No real routing or maps — directions are **scripted placeholders**.
+- Real routing requires API keys (`GOOGLE_MAPS_API_KEY` or `OPENROUTESERVICE_API_KEY`) and a manual `--origin`.
 - **Interrupting** speech mid-sentence depends on the `pyttsx3` backend; urgent messages are prioritized **between** phrases and pending navigation lines are dropped when a warning is pending.
 - Detection thresholds are simple heuristics (bbox size / center distance), not true depth.
