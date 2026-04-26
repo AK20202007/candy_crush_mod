@@ -32,7 +32,9 @@ from agentic_layer import (
     AgenticNavigationRouter,
     Direction,
     FrameContext,
+    INDOOR_LOCATION_TYPES,
     MotionState,
+    OUTDOOR_LOCATION_TYPES,
     RouteState,
     SceneState,
     SurfaceKind,
@@ -435,12 +437,40 @@ class VisionSystem:
             print(f"[vision] Processed {frame_count} frames total")
         return frame_count
 
+    def _infer_location_type(self, detections: List[Detection]) -> str:
+        """Use YOLO detections to infer indoor/outdoor when GPS is unavailable."""
+        _INDOOR_INDICATOR_LABELS = {
+            "chair", "couch", "bed", "dining table", "toilet", "sink",
+            "refrigerator", "oven", "microwave", "toaster", "tv", "laptop",
+            "mouse", "keyboard", "book", "vase", "potted plant", "clock",
+        }
+        _OUTDOOR_INDICATOR_LABELS = {
+            "car", "truck", "bus", "motorcycle", "bicycle", "traffic light",
+            "stop sign", "parking meter", "fire hydrant", "bench",
+        }
+        indoor_score = 0.0
+        outdoor_score = 0.0
+        for det in detections:
+            lbl = det.label.lower()
+            if lbl in _INDOOR_INDICATOR_LABELS:
+                indoor_score += det.confidence
+            elif lbl in _OUTDOOR_INDICATOR_LABELS:
+                outdoor_score += det.confidence
+        if indoor_score >= 0.8 and indoor_score > 2 * outdoor_score:
+            return "indoor"
+        if outdoor_score >= 1.0 and outdoor_score > 2 * indoor_score:
+            return "outdoor"
+        return self._cfg.location_type
+
     def _process_frame(self, frame: np.ndarray, w: int, h: int) -> AgentDecision:
         try:
             now_ms = int(time.time() * 1000)
             detections = self._detect(frame, w, h)
+            location_type = self._infer_location_type(detections)
             warnings = self._warnings_from_detections(detections, now_ms)
             surfaces = self._surface_observations(frame, w, h) if self._cfg.enable_surface_heuristic else []
+            if location_type in INDOOR_LOCATION_TYPES:
+                surfaces = [s for s in surfaces if s.kind not in {SurfaceKind.ROAD, SurfaceKind.SIDEWALK, SurfaceKind.CROSSWALK}]
             for surface in surfaces:
                 self._draw_surface_observation(frame, surface)
             ctx = FrameContext(
@@ -452,7 +482,7 @@ class VisionSystem:
                 motion=self._motion_state(),
                 route=self._route_state(),
                 scene=SceneState(
-                    location_type=self._cfg.location_type,
+                    location_type=location_type,
                     visual_confidence=self._cfg.visual_confidence,
                 ),
                 user=self._user_state(),
