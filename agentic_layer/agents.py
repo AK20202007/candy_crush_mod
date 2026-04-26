@@ -1012,6 +1012,7 @@ def _possible_wall_handle_message(surface: SurfaceObservation) -> str:
 def _door_handle_guidance_message(surface: SurfaceObservation) -> str:
     direction = _direction_phrase(surface.direction)
     distance = _walking_steps_phrase(surface.distance_m) or _distance_phrase(surface.distance_m)
+    approach = _door_handle_approach_phrase(surface)
     hand = str(surface.attributes.get("recommended_hand", "")).strip().lower()
     if hand not in {"left", "right"}:
         hand_phrase = "either hand"
@@ -1024,8 +1025,24 @@ def _door_handle_guidance_message(surface: SurfaceObservation) -> str:
         action = "find it by touch, then gently test whether the door pushes or pulls"
     return (
         f"Door handle detected {direction}, {distance}{height_phrase}. "
-        f"Reach with {hand_phrase}, {action}. Confirm by touch before opening."
+        f"{approach}. Reach with {hand_phrase}, {action}. Confirm by touch before opening."
     )
+
+
+def _careful_steps_phrase(distance_m: Optional[float]) -> str:
+    if distance_m is None:
+        return "carefully"
+    steps = max(1, int(round(distance_m / WALKING_STEP_M)))
+    unit = "step" if steps == 1 else "steps"
+    return f"about {steps} careful {unit}"
+
+
+def _door_handle_approach_phrase(surface: SurfaceObservation) -> str:
+    direction = _direction_phrase(surface.direction)
+    steps = _careful_steps_phrase(surface.distance_m)
+    if direction == "ahead":
+        return f"Move straight ahead {steps} toward it"
+    return f"Turn slightly {direction} and move {steps} toward it"
 
 
 def _door_handle_route_instruction(surface: SurfaceObservation) -> str:

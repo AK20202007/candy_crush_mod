@@ -609,6 +609,8 @@ def test_clear_door_handle_is_announced_with_touch_verification() -> None:
     assert decision.action == AgentAction.GUIDE
     assert decision.priority == 90
     assert "Door handle detected right" in decision.message
+    assert "Turn slightly right" in decision.message
+    assert "about 2 careful steps" in decision.message
     assert "your right hand" in decision.message
     assert "Confirm by touch before opening" in decision.message
 
@@ -655,6 +657,7 @@ def test_360_scan_announces_joechencc_model_handle() -> None:
     assert decision.action == AgentAction.GUIDE
     assert decision.priority == 92
     assert "Door handle detected left" in decision.message
+    assert "Turn slightly left" in decision.message
     assert "your left hand" in decision.message
     assert decision.debug["reason"] == "clear-door-handle-during-360-scan"
     assert route.mapping_state == "done"
