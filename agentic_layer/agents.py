@@ -27,7 +27,6 @@ HAZARD_LABELS = {
     "couch",
     "traffic cone",
     "pothole",
-    "door",
 }
 
 STOP_HAZARDS = {
@@ -45,7 +44,6 @@ STOP_HAZARDS = {
 }
 
 TARGET_KEYWORDS = {
-    "door": ["door", "entrance", "exit"],
     "stairs": ["stairs", "stair", "steps", "staircase"],
     "elevator": ["elevator", "lift"],
     "restroom": ["restroom", "bathroom", "toilet"],
@@ -356,38 +354,6 @@ class SafetyAgent(BaseAgent):
                                 "reason": "edge-density-obstacle",
                             },
                         )
-
-        # Door detection and specific instructions
-        if ctx.motion.is_moving:
-            for surface in ctx.surfaces:
-                if surface.kind == SurfaceKind.DOOR:
-                    if surface.confidence >= 0.6 and surface.distance_m is not None:
-                        handle_side = str(surface.attributes.get("handle_side", "unknown"))
-                        if surface.distance_m <= 1.5:
-                            return AgentDecision(
-                                action=AgentAction.GUIDE,
-                                priority=76 if surface.attributes.get("handle_detected") else 72,
-                                message=_door_guidance_message(surface),
-                                haptic=_door_haptic(surface),
-                                agents_consulted=[self.name, "door_detection"],
-                                debug={
-                                    "surface": surface.model_dump(),
-                                    "reason": "door-handle-guidance" if surface.attributes.get("handle_detected") else "door-frame-guidance",
-                                },
-                            )
-                        elif surface.distance_m <= 3.0:
-                            # Farther door - just announce it
-                            return AgentDecision(
-                                action=AgentAction.GUIDE,
-                                priority=60,
-                                message=_door_approach_message(surface),
-                                haptic=_door_haptic(surface) if handle_side in {"left", "right"} else HapticPattern.NONE,
-                                agents_consulted=[self.name, "door_detection"],
-                                debug={
-                                    "surface": surface.model_dump(),
-                                    "reason": "door-detection-announce",
-                                },
-                            )
 
         if ctx.scene.location_type == "street_crossing":
             return AgentDecision(
@@ -752,22 +718,6 @@ class IndoorNavigationAgent(BaseAgent):
         if ctx.user.target or ctx.user.query:
             return None
 
-        # Check for doors and provide hand guidance
-        for surface in ctx.surfaces:
-            if surface.kind == SurfaceKind.DOOR and surface.confidence >= 0.6:
-                if surface.distance_m is not None and surface.distance_m <= 2.0:
-                    return AgentDecision(
-                        action=AgentAction.GUIDE,
-                        priority=72,
-                        message=_door_guidance_message(surface),
-                        haptic=_door_haptic(surface),
-                        agents_consulted=[self.name, "door_guidance"],
-                        debug={
-                            "surface": surface.model_dump(),
-                            "reason": "door-handle-guidance" if surface.attributes.get("handle_detected") else "door-frame-guidance",
-                        },
-                    )
-
         blocking: List[Detection] = []
         for det in ctx.detections:
             if det.label.lower() in self.NON_OBSTACLE_LABELS:
@@ -861,9 +811,6 @@ def _indoor_obstacle_instruction(nearest: Detection, blocking: List[Detection], 
         return f"Person ahead {direction}, {distance}. {avoidance}"
     if label == "couch":
         return f"Couch {direction}, {distance}. {avoidance}"
-    if label == "door":
-        return f"Door {direction}, {distance}. Reach forward to find the handle."
-
     # Multiple grouped obstacles
     if len(blocking) > 1:
         return f"{cluster_labels} ahead {direction}, nearest {distance}. {avoidance}"
@@ -970,54 +917,18 @@ class ExitSeekingAgent(BaseAgent):
         if not ctx.scene.is_indoor:
             return None
 
-        # Look for door detections in the frame
-        doors = [
-            d for d in ctx.detections
-            if d.label.lower() == "door" and d.confidence >= 0.45
-        ]
-
-        # Also check surface observations for detected door handles
-        door_surfaces = [
-            s for s in ctx.surfaces
-            if s.kind == SurfaceKind.DOOR and s.confidence >= 0.55
-        ]
-
-        if doors:
-            nearest = sorted(doors, key=lambda d: d.distance_m if d.distance_m is not None else 99)[0]
-            direction = _direction_phrase(nearest.direction)
-            distance = _distance_phrase(nearest.distance_m)
-            return AgentDecision(
-                action=AgentAction.GUIDE,
-                priority=73,
-                message=f"Door detected {direction}, {distance}. Head toward it to exit.",
-                haptic=_haptic_for_direction(nearest.direction),
-                agents_consulted=[self.name],
-                debug={"door_detection": nearest.model_dump(), "reason": "exit-door-detected"},
-            )
-
-        if door_surfaces:
-            surface = door_surfaces[0]
-            return AgentDecision(
-                action=AgentAction.GUIDE,
-                priority=73,
-                message=_door_guidance_message(surface) + " This may be your exit.",
-                haptic=_door_haptic(surface),
-                agents_consulted=[self.name, "door_guidance"],
-                debug={"surface": surface.model_dump(), "reason": "exit-handle-detected"},
-            )
-
-        # No door visible — instruct user to scan
+        # No exit marker visible — instruct user to scan
         if not ctx.motion.is_moving:
             return AgentDecision(
                 action=AgentAction.ASK,
                 priority=65,
-                message="Looking for an exit. Slowly turn another 360 degrees and scan for a door or exit sign.",
+                message="Looking for an exit. Slowly turn another 360 degrees and scan for an exit sign or open passage.",
                 haptic=HapticPattern.CAUTION,
                 agents_consulted=[self.name],
                 debug={"reason": "exit-scanning"},
             )
 
-        # Moving but no door yet — trail the wall
+        # Moving but no clear exit marker yet — trail the wall
         return AgentDecision(
             action=AgentAction.GUIDE,
             priority=62,
@@ -1215,45 +1126,6 @@ def _best_walkable_surface(surfaces: Iterable[SurfaceObservation]) -> Optional[S
 
 def _surface_ahead(surface: SurfaceObservation) -> bool:
     return surface.direction in {Direction.CENTER, Direction.SLIGHT_LEFT, Direction.SLIGHT_RIGHT, Direction.UNKNOWN}
-
-
-def _door_haptic(surface: SurfaceObservation) -> HapticPattern:
-    hand = str(surface.attributes.get("recommended_hand", "")).lower()
-    side = str(surface.attributes.get("handle_side", "")).lower()
-    cue = hand if hand in {"left", "right"} else side
-    if cue == "left":
-        return HapticPattern.LEFT
-    if cue == "right":
-        return HapticPattern.RIGHT
-    return HapticPattern.CAUTION
-
-
-def _door_approach_message(surface: SurfaceObservation) -> str:
-    if surface.attributes.get("handle_detected"):
-        side = str(surface.attributes.get("handle_side", "ahead")).replace("_", " ")
-        height = str(surface.attributes.get("handle_height_zone", "hand height"))
-        return (
-            f"Door handle {side} {_direction_phrase(surface.direction)}, {height}, "
-            f"{_distance_phrase(surface.distance_m)}."
-        )
-    return f"Door {_direction_phrase(surface.direction)} {_distance_phrase(surface.distance_m)}. I do not see the handle yet."
-
-
-def _door_guidance_message(surface: SurfaceObservation) -> str:
-    distance = _distance_phrase(surface.distance_m)
-    if not surface.attributes.get("handle_detected"):
-        return f"Door ahead {distance}. I do not see the handle; stop, scan the door edge, then find the handle by touch."
-
-    side = str(surface.attributes.get("handle_side", "ahead")).replace("_", " ")
-    hand = str(surface.attributes.get("recommended_hand", "either hand")).replace("_", " ")
-    height = str(surface.attributes.get("handle_height_zone", "hand height"))
-    action = str(
-        surface.attributes.get(
-            "handle_action",
-            "use the handle, then gently test whether the door pushes or pulls",
-        )
-    )
-    return f"Door handle on the {side}, {height}, {distance}. Use your {hand}; {action}."
 
 
 def _edge_contact_sides(det: Detection) -> set[str]:

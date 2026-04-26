@@ -202,15 +202,13 @@ def _is_indoor_coords(lat: float, lon: float) -> bool:
 def _exit_seeking_steps() -> List[str]:
     """Spoken steps for vision-based exit seeking (no map data available).
 
-    The agent will instruct the user to slowly turn and scan for doors.
-    The ExitSeekingAgent in the agentic layer handles real-time door
-    detection during this phase.
+    The agent will instruct the user to locate a safe exit path.
     """
     return [
         "You need to exit the building first.",
-        "Slowly turn to your right and scan for a door or exit sign.",
-        "If you feel a wall, trail your hand along it toward a door.",
-        "When a door is detected, the system will guide you to the handle.",
+        "Slowly turn to your right and scan for an exit sign or open passage.",
+        "If you feel a wall, trail your hand along it toward the nearest exit path.",
+        "When an exit is detected, the system will guide you toward it.",
         "After exiting, outdoor navigation will begin.",
     ]
 
@@ -220,7 +218,7 @@ def _enter_building_steps(destination: str) -> List[str]:
     return [
         f"You are approaching {destination}.",
         "Look for the building entrance ahead.",
-        "The system will detect the door and guide you to the handle.",
+        "The system will detect the entrance and guide you toward it.",
         f"Once inside, you have arrived at {destination}.",
     ]
 

@@ -74,7 +74,6 @@ SIGNAL_CLASSES: Set[str] = {
     "traffic signal",
 }
 OPTIONAL_CLASSES: Set[str] = {
-    "door",
     "stairs",
     "stair",
     "staircase",
@@ -92,7 +91,6 @@ OBSTACLE_LABELS = {
     "bench",
     "dining table",
     "couch",
-    "door",
     "traffic cone",
     "bicycle",
     "motorcycle",
@@ -579,6 +577,9 @@ class VisionSystem:
         detections: List[Detection] = []
         for i, ((x1, y1, x2, y2), cls_id) in enumerate(zip(boxes, clss)):
             label = self._model.names[int(cls_id)].lower()
+            if label in {"door", "door handle", "handle"}:
+                # Door/handle guidance is intentionally disabled for mobile flow.
+                continue
             confidence = float(confs[i]) if i < len(confs) else 0.0
             det = detection_from_bbox(
                 label=label,
@@ -731,15 +732,7 @@ class VisionSystem:
             import traceback
             traceback.print_exc()
 
-        # Door detection using vertical edge patterns
-        try:
-            door = self._detect_door(frame, w, h)
-            if door is not None:
-                observations.append(door)
-        except Exception as e:
-            print(f"[vision] Door detection error: {e}")
-            import traceback
-            traceback.print_exc()
+        # Door-handle detection intentionally disabled for mobile/web flow.
 
         # White object detection for low-contrast obstacles (white tables, boxes)
         try:
@@ -924,12 +917,10 @@ class VisionSystem:
         )
 
     def _detect_door(self, frame: np.ndarray, w: int, h: int) -> Optional[SurfaceObservation]:
-        """Detect a door interaction target.
+        """Door and handle detection are disabled for mobile/web flow."""
+        return None
 
-        The preferred signal is the handle itself. Door frames are useful
-        context, but they are less actionable than "handle at 2 o'clock; reach
-        right hand; press the lever down."
-        """
+        """Legacy implementation retained below (unreachable)."""
         handle = self._detect_door_handle(frame, w, h)
         frame_context = self._detect_door_frame_context(frame, w, h)
 

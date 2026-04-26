@@ -21,6 +21,14 @@
 </head>
 <body>
   <h1>Stream camera → laptop (thin client)</h1>
+  <div id="audioGate" class="warn" style="display:none;">
+    Audio is blocked by browser policy.
+    <button type="button" id="btnEnableAudio">Enable audio</button>
+  </div>
+  <div id="locationGate" class="warn" style="display:none;">
+    Location access is required for GPS-guided navigation.
+    <button type="button" id="btnEnableLocation">Enable location</button>
+  </div>
   <p class="warn">
     If the page <strong>spins forever</strong>, open <code>http://…/ping</code> on the phone first (same host/port as this app).
     You should see <code>{"status":"ok"}</code> in under a second. If not, the phone cannot reach your laptop (wrong IP, different Wi‑Fi, or macOS Firewall blocking Python).
@@ -36,7 +44,11 @@
   <input id="destination" type="text" value="Library" />
 
   <div class="row">
+    <button type="button" id="btnListen">Voice destination</button>
     <button type="button" id="btnSession">Create session</button>
+  </div>
+  <div class="row">
+    <button type="button" id="btnLocation">Use my location</button>
     <button type="button" id="btnStream" disabled>Start streaming</button>
   </div>
   <div class="row">
@@ -52,7 +64,13 @@
   <script>
     const baseUrl = document.getElementById('baseUrl');
     const destination = document.getElementById('destination');
+    const btnListen = document.getElementById('btnListen');
+    const btnEnableAudio = document.getElementById('btnEnableAudio');
+    const audioGate = document.getElementById('audioGate');
+    const btnEnableLocation = document.getElementById('btnEnableLocation');
+    const locationGate = document.getElementById('locationGate');
     const btnSession = document.getElementById('btnSession');
+    const btnLocation = document.getElementById('btnLocation');
     const btnStream = document.getElementById('btnStream');
     const btnStop = document.getElementById('btnStop');
     const video = document.getElementById('video');
@@ -67,43 +85,615 @@
     let timer = null;
     let lastSpoken = '';
     let lastSpokenAt = 0;
+    let locationWatchId = null;
+    let currentAudio = null;
+    let audioCtx = null;
+    let currentSource = null;
+    let audioUnlocked = false;
+    let warnedAudioPolicy = false;
+    let mediaPrimed = false;
+    let locationPrimed = false;
+    let destinationConfirmed = false;
+    let pendingSpeechText = '';
+    let sttActive = false;
+    let speechLoopActive = false;
+    let gpsSpeechQueue = [];
+    let latestVisualWarning = null;
+    let lastRouteInstruction = '';
+    let lastRouteInstructionAt = 0;
+    let lastKnownCoords = null;
+
+    function getCurrentPositionAsync(options) {
+      return new Promise((resolve, reject) => {
+        if (!navigator.geolocation) return reject(new Error('geolocation unsupported'));
+        navigator.geolocation.getCurrentPosition(resolve, reject, options);
+      });
+    }
+
+    async function unlockAudioOnce() {
+      if (audioUnlocked) return true;
+      try {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (AC) {
+          if (!audioCtx) audioCtx = new AC();
+          await audioCtx.resume();
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          gain.gain.value = 0.0001;
+          osc.connect(gain).connect(audioCtx.destination);
+          osc.start();
+          osc.stop(audioCtx.currentTime + 0.02);
+        }
+        audioUnlocked = true;
+        warnedAudioPolicy = false;
+        audioGate.style.display = 'none';
+        log('audio unlocked');
+        if (pendingSpeechText) {
+          const t = pendingSpeechText;
+          pendingSpeechText = '';
+          maybeSpeak(t, 70, 'visual');
+        }
+        return true;
+      } catch (_e) {
+        audioGate.style.display = 'block';
+        return false;
+      }
+    }
+
+    async function primeMediaPermissions() {
+      if (mediaPrimed || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+      mediaPrimed = true;
+      try {
+        // Request separately: on some mobile browsers, combined audio+video
+        // requests can fail or leave the mic in a bad state for WebSpeech.
+        const cam = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment' },
+          audio: false,
+        });
+        cam.getTracks().forEach((t) => t.stop());
+        const mic = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        mic.getTracks().forEach((t) => t.stop());
+        log('camera + microphone permission ready');
+      } catch (e) {
+        log('media permission prompt not completed yet: ' + e);
+      }
+    }
+
+    async function primeLocationPermission() {
+      if (locationPrimed || !navigator.geolocation) return;
+      locationPrimed = true;
+      try {
+        // Check permission state first; do not force-request on load because
+        // many browsers suppress prompt without a user gesture.
+        if (navigator.permissions && navigator.permissions.query) {
+          const p = await navigator.permissions.query({ name: 'geolocation' });
+          if (p.state === 'granted') {
+            log('location permission ready');
+            locationGate.style.display = 'none';
+            return;
+          }
+          if (p.state === 'denied') {
+            log('location permission is blocked in browser settings');
+            locationGate.style.display = 'block';
+            return;
+          }
+          // prompt state: ask user to click Enable location (gesture).
+          locationGate.style.display = 'block';
+          log('tap Enable location to grant GPS access');
+          return;
+        }
+        // No Permissions API; require explicit user gesture path.
+        locationGate.style.display = 'block';
+        log('tap Enable location to grant GPS access');
+      } catch (e) {
+        log('location permission not granted yet: ' + (e && e.message ? e.message : e));
+        locationGate.style.display = 'block';
+      }
+    }
 
     function log(msg) {
       logEl.textContent = (new Date()).toISOString().slice(11, 19) + ' ' + msg + '\n' + logEl.textContent;
     }
 
-    function maybeSpeak(text, priority) {
+    function setDestinationConfirmed(v) {
+      destinationConfirmed = !!v;
+      if (!destinationConfirmed) {
+        btnSession.disabled = false;
+        btnStream.disabled = true;
+      } else {
+        btnSession.disabled = false;
+        btnStream.disabled = !sessionId;
+      }
+    }
+
+
+    async function speakWithServerTTS(text) {
+      const root = baseUrl.value.trim().replace(/\/$/, '');
+      const fd = new FormData();
+      fd.append('text', text);
+      const r = await fetch(root + '/stream/tts', { method: 'POST', body: fd });
+      if (!r.ok) throw new Error(await r.text());
+      const blob = await r.blob();
+      // Prefer WebAudio playback once unlocked; this is more reliable than
+      // HTMLAudio on mobile after async operations (mic/network callbacks).
+      if (audioCtx && audioUnlocked) {
+        const arr = await blob.arrayBuffer();
+        const decoded = await audioCtx.decodeAudioData(arr.slice(0));
+        const src = audioCtx.createBufferSource();
+        src.buffer = decoded;
+        src.connect(audioCtx.destination);
+        currentSource = src;
+        await new Promise((resolve, reject) => {
+          const watchdog = setTimeout(() => {
+            try { src.stop(0); } catch {}
+            reject(new Error('tts playback timeout'));
+          }, 12000);
+          src.onended = () => {
+            clearTimeout(watchdog);
+            if (currentSource === src) currentSource = null;
+            resolve();
+          };
+          try {
+            src.start(0);
+          } catch (e) {
+            clearTimeout(watchdog);
+            reject(e);
+          }
+        });
+        return;
+      }
+
+      // Fallback to HTMLAudio when WebAudio context is not available.
+      const url = URL.createObjectURL(blob);
+      const a = new Audio(url);
+      currentAudio = a;
+      await new Promise((resolve, reject) => {
+        const watchdog = setTimeout(() => {
+          try { a.pause(); } catch {}
+          reject(new Error('tts playback timeout'));
+        }, 12000);
+        a.onended = () => {
+          clearTimeout(watchdog);
+          URL.revokeObjectURL(url);
+          resolve();
+        };
+        a.onerror = (e) => {
+          clearTimeout(watchdog);
+          URL.revokeObjectURL(url);
+          reject(e || new Error('audio playback failed'));
+        };
+        a.play().catch(reject);
+      });
+    }
+
+    async function playSpeechNow(text) {
+      if (!text) return;
+      try {
+        await speakWithServerTTS(text);
+      } catch (e) {
+        const msg = String(e || '');
+        if (msg.toLowerCase().includes('notallowed') || msg.toLowerCase().includes('not allowed')) {
+          if (!warnedAudioPolicy) {
+            warnedAudioPolicy = true;
+            log('audio blocked by browser policy — tap a button once to re-enable speech');
+          }
+          pendingSpeechText = text;
+          audioGate.style.display = 'block';
+          return;
+        }
+        try {
+          window.speechSynthesis.cancel();
+          const u = new SpeechSynthesisUtterance(text);
+          u.rate = 1.0;
+          window.speechSynthesis.speak(u);
+          log('tts fallback (browser): ' + e);
+        } catch (e2) {
+          log('speech error: ' + e2);
+        }
+      }
+    }
+
+    async function runSpeechLoop() {
+      if (speechLoopActive) return;
+      speechLoopActive = true;
+      try {
+        while (gpsSpeechQueue.length > 0 || latestVisualWarning) {
+          let next = null;
+          if (gpsSpeechQueue.length > 0) {
+            next = gpsSpeechQueue.shift();
+          } else if (latestVisualWarning) {
+            next = latestVisualWarning;
+            latestVisualWarning = null;
+          }
+          if (next) {
+            await playSpeechNow(next);
+          }
+        }
+      } finally {
+        speechLoopActive = false;
+      }
+    }
+
+    function maybeSpeak(text, priority, kind = 'visual') {
       if (!text) return;
       const now = Date.now();
       const urgent = priority >= 95;
       if (!urgent && text === lastSpoken && now - lastSpokenAt < 3500) return;
       lastSpoken = text;
       lastSpokenAt = now;
+      if (kind === 'gps') {
+        if (gpsSpeechQueue[gpsSpeechQueue.length - 1] !== text) {
+          gpsSpeechQueue.push(text);
+        }
+      } else {
+        // Keep only most recent visual warning while GPS instructions are pending.
+        latestVisualWarning = text;
+      }
+      runSpeechLoop().catch((e) => log('speech loop error: ' + e));
+    }
+
+    async function speakPromptNonBlocking(text, timeoutMs = 3500) {
+      // Never block flow forever on mobile audio policy issues.
+      const timeout = new Promise((resolve) => setTimeout(resolve, timeoutMs));
       try {
-        window.speechSynthesis.cancel();
-        const u = new SpeechSynthesisUtterance(text);
-        u.rate = 1.0;
-        window.speechSynthesis.speak(u);
+        await Promise.race([speakWithServerTTS(text), timeout]);
+        return;
+      } catch (_e) {
+        // Try browser speech but still cap by timeout.
+        try {
+          window.speechSynthesis.cancel();
+          const u = new SpeechSynthesisUtterance(text);
+          u.rate = 1.0;
+          await Promise.race([
+            new Promise((resolve) => {
+              let done = false;
+              const finish = () => {
+                if (done) return;
+                done = true;
+                resolve();
+              };
+              u.onend = finish;
+              u.onerror = finish;
+              window.speechSynthesis.speak(u);
+            }),
+            timeout,
+          ]);
+        } catch {
+          // ignore
+        }
+      }
+    }
+
+    async function captureDestinationViaServerSTT() {
+      if (sttActive) throw new Error('already listening');
+      const root = baseUrl.value.trim().replace(/\/$/, '');
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('getUserMedia unavailable');
+      }
+      sttActive = true;
+      if (currentAudio) {
+        try { currentAudio.pause(); } catch {}
+      }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      try {
+        if (typeof MediaRecorder === 'undefined') {
+          throw new Error('MediaRecorder unavailable');
+        }
+        const tryTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', ''];
+        let recorder = null;
+        for (const t of tryTypes) {
+          try {
+            recorder = t ? new MediaRecorder(stream, { mimeType: t }) : new MediaRecorder(stream);
+            break;
+          } catch {}
+        }
+        if (!recorder) throw new Error('MediaRecorder init failed');
+
+        const chunks = [];
+        await new Promise((resolve, reject) => {
+          const to = setTimeout(() => {
+            try { recorder.stop(); } catch {}
+          }, 5000);
+          recorder.ondataavailable = (e) => {
+            if (e && e.data && e.data.size > 0) chunks.push(e.data);
+          };
+          recorder.onerror = (e) => {
+            clearTimeout(to);
+            reject(new Error((e && e.error && e.error.message) || 'recording failed'));
+          };
+          recorder.onstop = () => {
+            clearTimeout(to);
+            resolve();
+          };
+          recorder.start();
+          log('listening for destination…');
+        });
+
+        const blob = new Blob(chunks, { type: (chunks[0] && chunks[0].type) || 'audio/webm' });
+        if (!blob || blob.size < 256) throw new Error('empty recording');
+        const fd = new FormData();
+        fd.append('audio', blob, 'destination.webm');
+        const r = await fetch(root + '/stream/stt', { method: 'POST', body: fd });
+        if (!r.ok) throw new Error(await r.text());
+        const j = await r.json();
+        return (j.text || '').trim();
+      } finally {
+        stream.getTracks().forEach((t) => t.stop());
+        sttActive = false;
+      }
+    }
+
+    async function speakPromptStrict(text) {
+      // Strict sequencing for confirmation flow: do not continue until speech
+      // playback has either completed or clearly failed.
+      try {
+        await speakWithServerTTS(text);
+        return true;
       } catch (e) {
-        log('speech error: ' + e);
+        const msg = String(e || '').toLowerCase();
+        if (msg.includes('notallowed') || msg.includes('not allowed')) {
+          pendingSpeechText = text;
+          audioGate.style.display = 'block';
+        }
+        try {
+          window.speechSynthesis.cancel();
+          const u = new SpeechSynthesisUtterance(text);
+          u.rate = 1.0;
+          await new Promise((resolve) => {
+            let done = false;
+            const finish = () => {
+              if (done) return;
+              done = true;
+              resolve();
+            };
+            u.onend = finish;
+            u.onerror = finish;
+            window.speechSynthesis.speak(u);
+            setTimeout(finish, 8000);
+          });
+          return true;
+        } catch {
+          return false;
+        }
       }
     }
 
     btnSession.onclick = async () => {
+      if (!destinationConfirmed) {
+        log('please confirm destination first (use Voice destination)');
+        return;
+      }
+      await unlockAudioOnce();
       const root = baseUrl.value.trim().replace(/\/$/, '');
       const fd = new FormData();
       fd.append('destination', destination.value.trim() || 'Unknown');
+      try {
+        const pos = await getCurrentPositionAsync({ enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 });
+        lastKnownCoords = {
+          latitude: Number(pos.coords.latitude),
+          longitude: Number(pos.coords.longitude),
+          accuracy: Number.isFinite(pos.coords.accuracy) ? Number(pos.coords.accuracy) : null,
+          at: Date.now(),
+        };
+        fd.append('latitude', String(pos.coords.latitude));
+        fd.append('longitude', String(pos.coords.longitude));
+        log('using GPS bias for destination lookup');
+      } catch (e) {
+        if (lastKnownCoords && Number.isFinite(lastKnownCoords.latitude) && Number.isFinite(lastKnownCoords.longitude)) {
+          fd.append('latitude', String(lastKnownCoords.latitude));
+          fd.append('longitude', String(lastKnownCoords.longitude));
+          log('GPS live read unavailable; using cached location');
+        } else {
+          const msg = e && e.message ? e.message : String(e);
+          log('GPS unavailable for session create: ' + msg);
+          if (navigator.permissions && navigator.permissions.query) {
+            try {
+              const p = await navigator.permissions.query({ name: 'geolocation' });
+              log('geolocation permission state for this URL: ' + p.state);
+            } catch {}
+          }
+          log('tap Enable location, then retry Create session');
+        }
+      }
       try {
         const r = await fetch(root + '/stream/session', { method: 'POST', body: fd });
         if (!r.ok) throw new Error(await r.text());
         const j = await r.json();
         sessionId = j.session_id;
-        log('session ' + sessionId);
+        const desc = j.destination_address ? ` (${j.destination_address})` : '';
+        log('session ' + sessionId + ' -> ' + (j.destination || destination.value) + desc);
+        if (j.destination) destination.value = j.destination;
+        if (j.route_first_instruction) {
+          log('route: ' + j.route_first_instruction);
+          maybeSpeak(j.route_first_instruction, 60, 'gps');
+        }
+        setDestinationConfirmed(true);
         btnStream.disabled = false;
       } catch (e) {
         log('session failed: ' + e);
         sessionId = null;
         btnStream.disabled = true;
+      }
+    };
+
+    btnEnableAudio.onclick = async () => {
+      const ok = await unlockAudioOnce();
+      if (!ok) {
+        log('audio still blocked; interact with page and try again');
+        return;
+      }
+      try {
+        await speakPromptNonBlocking('Audio enabled.', 1500);
+      } catch {}
+    };
+
+    btnEnableLocation.onclick = async () => {
+      if (!navigator.geolocation) {
+        log('geolocation unsupported in this browser');
+        return;
+      }
+      try {
+        const pos = await getCurrentPositionAsync({
+          enableHighAccuracy: false,
+          timeout: 10000,
+          maximumAge: 60000,
+        });
+        lastKnownCoords = {
+          latitude: Number(pos.coords.latitude),
+          longitude: Number(pos.coords.longitude),
+          accuracy: Number.isFinite(pos.coords.accuracy) ? Number(pos.coords.accuracy) : null,
+          at: Date.now(),
+        };
+        locationGate.style.display = 'none';
+        log('location permission ready (cached)');
+      } catch (e) {
+        const msg = e && e.message ? e.message : String(e);
+        log('location permission still blocked: ' + msg);
+        log('open browser site settings for this URL and set Location to Allow, then reload');
+        locationGate.style.display = 'block';
+      }
+    };
+
+    async function confirmDestinationByVoice(cleanedDestination) {
+      const prompt = `Did you mean ${cleanedDestination}?`;
+      const spoke = await speakPromptStrict(prompt);
+      if (!spoke) {
+        log('confirmation audio failed; tap Enable audio and try again');
+        return false;
+      }
+      // Small handoff delay so mic starts after playback tear-down.
+      await new Promise((r) => setTimeout(r, 220));
+      const heard = (await captureDestinationViaServerSTT()).toLowerCase();
+      log('heard confirmation: ' + (heard || '(nothing)'));
+      return /\b(yes|confirm)\b/.test(heard);
+    }
+
+    btnListen.onclick = async () => {
+      await unlockAudioOnce();
+      const prompt = 'Where would you like to go?';
+      try {
+        const spoke = await speakPromptStrict(prompt);
+        if (!spoke) {
+          log('prompt audio failed; tap Enable audio and try again');
+          return;
+        }
+        log('prompt spoken: ' + prompt);
+      } catch (e) {
+        log('prompt failed: ' + e);
+        return;
+      }
+
+      try {
+        // Listening phase starts only after prompt playback is done.
+        const cleaned = await captureDestinationViaServerSTT();
+        if (!cleaned) {
+          log('voice heard nothing; tap Voice destination to try again');
+          maybeSpeak('I did not catch that.', 60);
+          return;
+        }
+        log('heard destination: ' + cleaned);
+        const ok = await confirmDestinationByVoice(cleaned);
+        if (!ok) {
+          setDestinationConfirmed(false);
+          maybeSpeak('Destination not confirmed. Please say your destination again.', 60);
+          log('destination not confirmed; tap Voice destination to retry');
+          return;
+        }
+        destination.value = cleaned;
+        setDestinationConfirmed(true);
+        sessionId = null;
+        btnStream.disabled = true;
+        maybeSpeak('Destination confirmed. Starting navigation.', 60);
+        // Immediately proceed to session creation + guidance flow.
+        await btnSession.onclick();
+        if (sessionId) {
+          btnStream.onclick();
+        }
+      } catch (e) {
+        log('voice capture failed: ' + e);
+        maybeSpeak('I did not catch that.', 60);
+      }
+    };
+
+    async function sendLocation(lat, lng, accuracy) {
+      if (!sessionId) return;
+      lastKnownCoords = {
+        latitude: Number(lat),
+        longitude: Number(lng),
+        accuracy: Number.isFinite(accuracy) ? Number(accuracy) : null,
+        at: Date.now(),
+      };
+      const root = baseUrl.value.trim().replace(/\/$/, '');
+      const fd = new FormData();
+      fd.append('session_id', sessionId);
+      fd.append('latitude', String(lat));
+      fd.append('longitude', String(lng));
+      if (Number.isFinite(accuracy)) fd.append('horizontal_accuracy_m', String(accuracy));
+      try {
+        const r = await fetch(root + '/stream/location', { method: 'POST', body: fd });
+        if (!r.ok) throw new Error(await r.text());
+        const j = await r.json();
+        const loc = j.location || {};
+        if (j.route_current_instruction) {
+          const now = Date.now();
+          if (
+            j.route_current_instruction !== lastRouteInstruction ||
+            now - lastRouteInstructionAt > 12000
+          ) {
+            lastRouteInstruction = j.route_current_instruction;
+            lastRouteInstructionAt = now;
+            log('route: ' + j.route_current_instruction);
+            maybeSpeak(j.route_current_instruction, 60, 'gps');
+          }
+        }
+        log(
+          'location ' +
+            Number(loc.latitude).toFixed(5) +
+            ',' +
+            Number(loc.longitude).toFixed(5) +
+            ' ±' +
+            (loc.horizontal_accuracy_m == null ? '?' : Number(loc.horizontal_accuracy_m).toFixed(1)) +
+            'm'
+        );
+      } catch (e) {
+        log('location update failed: ' + e);
+      }
+    }
+
+    btnLocation.onclick = async () => {
+      await unlockAudioOnce();
+      if (!sessionId) {
+        log('create session first');
+        return;
+      }
+      if (!navigator.geolocation) {
+        log('geolocation unsupported');
+        return;
+      }
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          lastKnownCoords = {
+            latitude: Number(pos.coords.latitude),
+            longitude: Number(pos.coords.longitude),
+            accuracy: Number.isFinite(pos.coords.accuracy) ? Number(pos.coords.accuracy) : null,
+            at: Date.now(),
+          };
+          sendLocation(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy);
+        },
+        (err) => {
+          log('location error: ' + err.message);
+          if (err && err.code === 1) {
+            log('enable location in browser/site settings, then reload this page');
+          }
+        },
+        { enableHighAccuracy: true, timeout: 15000, maximumAge: 10000 }
+      );
+      if (locationWatchId == null) {
+        locationWatchId = navigator.geolocation.watchPosition(
+          (pos) => sendLocation(pos.coords.latitude, pos.coords.longitude, pos.coords.accuracy),
+          () => {},
+          { enableHighAccuracy: false, timeout: 30000, maximumAge: 30000 }
+        );
       }
     };
 
@@ -127,7 +717,26 @@
         const j = await r.json();
         preview.src = URL.createObjectURL(blob);
         const d = j.decision || {};
-        if (j.speak) maybeSpeak(d.message || '', d.priority || 0);
+        const routeInstruction = j.route_current_instruction || ((j.session || {}).route_current_instruction || '');
+        if (routeInstruction) {
+          const now = Date.now();
+          if (routeInstruction !== lastRouteInstruction || now - lastRouteInstructionAt > 12000) {
+            lastRouteInstruction = routeInstruction;
+            lastRouteInstructionAt = now;
+            log('route: ' + routeInstruction);
+            maybeSpeak(routeInstruction, 60, 'gps');
+          }
+        }
+        // GPS instructions are spoken from route_current_instruction only.
+        // Ignore generic guide chatter from frame decisions to prevent
+        // repeated "approaching ..." from starving true GPS step prompts.
+        if (j.speak && d.action !== 'guide') {
+          maybeSpeak(d.message || '', d.priority || 0, 'visual');
+        }
+        const sl = (j.session || {}).location;
+        if (sl && Number.isFinite(sl.latitude) && Number.isFinite(sl.longitude)) {
+          log('gps=' + Number(sl.latitude).toFixed(4) + ',' + Number(sl.longitude).toFixed(4));
+        }
         if (d.action && d.action !== 'silent') log(d.action + ' p=' + d.priority + ' ' + (d.message || '').slice(0, 80));
       } catch (e) {
         log('frame error: ' + e);
@@ -135,7 +744,16 @@
     }
 
     btnStream.onclick = async () => {
-      if (!sessionId) return;
+      if (!destinationConfirmed) {
+        log('confirm destination first before starting navigation');
+        return;
+      }
+      await unlockAudioOnce();
+      if (!sessionId) {
+        log('creating session first…');
+        await btnSession.onclick();
+        if (!sessionId) return;
+      }
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
           video: { facingMode: 'environment', width: { ideal: 960 } },
@@ -154,6 +772,7 @@
     };
 
     btnStop.onclick = () => {
+      unlockAudioOnce().catch(() => {});
       streaming = false;
       if (timer) clearInterval(timer);
       timer = null;
@@ -165,6 +784,18 @@
       btnStop.disabled = true;
       log('stopped');
     };
+
+    destination.addEventListener('input', () => {
+      setDestinationConfirmed(false);
+      sessionId = null;
+    });
+
+    // Proactively ask for camera + microphone permissions on load to avoid
+    // interrupting destination voice flow in the middle of interaction.
+    window.addEventListener('load', () => {
+      primeMediaPermissions().catch(() => {});
+      primeLocationPermission().catch(() => {});
+    });
   </script>
 </body>
 </html>
