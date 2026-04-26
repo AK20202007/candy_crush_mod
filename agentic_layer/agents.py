@@ -171,7 +171,7 @@ def _estimated_clearance_steps(distance_m: Optional[float], label: Optional[str]
     """Estimate how many steps the user needs to clear the obstacle."""
     if label:
         width_hint = {
-            "dining table": 3, "couch": 3, "bench": 2, "car": 4,
+            "dining table": 3, "couch": 3, "bench": 2, "chair": 2, "car": 4,
             "bus": 5, "truck": 4, "bicycle": 2, "motorcycle": 2,
         }.get(label.lower())
         if width_hint is not None:
@@ -255,6 +255,7 @@ class SafetyAgent(BaseAgent):
             is_stop = (
                 det.label.lower() in STOP_HAZARDS
                 or (det.distance_m is not None and det.distance_m <= 0.8)
+                or (det.label.lower() == "chair" and det.distance_m is not None and det.distance_m <= 0.6)
                 or _partial_edge_requires_stop(det)
             )
             subject = f"partially visible {det.label}" if partial_edge else det.label

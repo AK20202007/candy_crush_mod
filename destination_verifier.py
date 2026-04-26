@@ -219,10 +219,17 @@ def get_voice_confirmation(timeout: float = 5.0) -> bool:
         print("\n[system] 🎤 Say 'correct', 'confirm', or 'yes' to proceed, or 'no' to change destination...")
         print('\a', end='', flush=True)  # Terminal beep to cue the user
 
-        with sr.Microphone() as source:
-            recognizer.adjust_for_ambient_noise(source, duration=0.2)
-            audio = recognizer.listen(source, timeout=3.0, phrase_time_limit=3.0)
-            wav_data = audio.get_wav_data()
+        try:
+            with sr.Microphone() as source:
+                recognizer.adjust_for_ambient_noise(source, duration=0.2)
+                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=5.0)
+                wav_data = audio.get_wav_data()
+        except sr.WaitTimeoutError:
+            print("[system] Confirmation timed out (no speech detected).")
+            return False
+        except Exception as e:
+            print(f"[system] Microphone error: {e}")
+            return False
         
         # Send to ElevenLabs STT
         import requests

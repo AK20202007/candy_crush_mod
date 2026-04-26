@@ -160,12 +160,14 @@ class NavigationInterface:
             time_since_last = now_ms - self._last_decision_time_ms
             
             # Different timing based on action type
-            if decision.action == AgentAction.WARN:
-                min_interval = 2000  # 2 seconds for warnings
+            if decision.priority >= 95:
+                min_interval = 0     # No delay for critical/immediate warnings
+            elif decision.action == AgentAction.WARN:
+                min_interval = 500   # 0.5 seconds for other warnings
             elif decision.action == AgentAction.GUIDE:
-                min_interval = 5000  # 5 seconds for guidance
+                min_interval = 2000  # 2 seconds for guidance (faster navigation)
             else:
-                min_interval = 3000  # 3 seconds default
+                min_interval = 1500  # 1.5 seconds default
             
             if time_since_last < min_interval:
                 return False

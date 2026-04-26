@@ -351,21 +351,21 @@ class ElevenLabsSpeechController:
                 continue
             
             self.is_playing = True
-            # Try ElevenLabs first, then fallback
-            success = False
-            if self.api_key:
-                success = self._speak_with_elevenlabs(message)
-            
-            if not success and self.fallback_to_system:
-                success = self._speak_with_fallback(message)
-            
-            self.is_playing = False
+            try:
+                # Try ElevenLabs first, then fallback
+                success = False
+                if self.api_key:
+                    success = self._speak_with_elevenlabs(message)
+                
+                if not success and self.fallback_to_system:
+                    success = self._speak_with_fallback(message)
+            finally:
+                self.is_playing = False
             
             if success:
                 self._messages_spoken += 1
-                # Clear backlog to ensure real-time response
-                self.clear_queues()
-    
+                # Messages are now sequenced naturally without purging the queue
+        
     def recognize_speech(
         self,
         timeout: float = 10.0,
