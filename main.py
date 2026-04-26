@@ -153,21 +153,14 @@ class NavigationApp:
                 camera_mount=args.camera_mount
             )
             
-            def handle_decision(decision):
+            def handle_decision(ctx, decision):
                 """Callback for vision system decisions."""
                 if self.interface and not self.stop_event.is_set():
-                    # Create a minimal frame context
-                    from agentic_layer.models import FrameContext, SceneState
-                    ctx = FrameContext(
-                        timestamp_ms=int(time.time() * 1000),
-                        frame_id=str(time.time()),
-                        scene=SceneState(location_type="sidewalk")
-                    )
                     self.interface.process_decision(decision, ctx)
             
             self.vision = VisionSystem(
                 config=vision_config,
-                on_decision=handle_decision,
+                on_frame_decision=handle_decision,
                 route_provider=lambda: self.route_state,
             )
             
@@ -222,16 +215,18 @@ class NavigationApp:
                 time.sleep(4)
             self.interface.speech.clear_queues()
 
+        time.sleep(0.5)
         recognizer = sr.Recognizer()
-        recognizer.energy_threshold = 300
+        recognizer.energy_threshold = 150
         recognizer.dynamic_energy_threshold = True
+        recognizer.pause_threshold = 1.0
 
         print(f"\n[system] 🎤 Listening... (speak now)")
 
         try:
             with sr.Microphone() as source:
-                recognizer.adjust_for_ambient_noise(source, duration=0.2)
-                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=5)
+                recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=10)
                 wav_data = audio.get_wav_data()
         except Exception as e:
             print(f"[system] Microphone error: {e}")
@@ -399,13 +394,55 @@ class NavigationApp:
                 print(f"[system]   Address : {destination_address}")
                 print(f"[system]   Coords  : lat={destination_lat}, lng={destination_lng}")
 
-                self.interface.set_destination(destination_name)
-
-                # Initialize route state and trigger vision mapping
-                self.route_state.active = True
-                self.route_state.destination = destination_name
-                self.route_state.mapping_state = "pending"
-                self.route_state.next_instruction = f"Head toward {destination_name}."
+                # Plan the route using the professional NavigationPlanner
+                try:
+                    from address_navigation import NavigationPlanner, LegType
+                    from gps_location import GPSCoords
+                    
+                    ors_key = (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip() or None
+                    indoor_layout = os.environ.get("INDOOR_LAYOUT_JSON")
+                    planner = NavigationPlanner(
+                        ors_key=ors_key,
+                        indoor_graph_path=indoor_layout,
+                    )
+                    
+                    # Prepare origin and destination data
+                    origin_gps = None
+                    if current_lat and current_lng:
+                        origin_gps = GPSCoords(latitude=current_lat, longitude=current_lng)
+                    
+                    dest_gps = None
+                    if destination_lat and destination_lng:
+                        dest_gps = GPSCoords(latitude=destination_lat, longitude=destination_lng)
+                    
+                    # Generate the plan
+                    plan = planner.plan("Your current location", destination_name, origin_gps=origin_gps, dest_gps=dest_gps)
+                    
+                    # Initialize route state
+                    self.route_state.active = True
+                    self.route_state.destination = destination_name
+                    
+                    # If we have specific steps, use the first one
+                    all_steps = plan.all_steps()
+                    if all_steps:
+                        self.route_state.next_instruction = all_steps[0]
+                    else:
+                        self.route_state.next_instruction = f"Head toward {destination_name}."
+                    
+                    # Trigger 360-degree mapping if starting indoors
+                    if plan.origin_is_indoor:
+                        self.route_state.mapping_state = "pending"
+                        print("[system] Starting indoors. Mapping required.")
+                    else:
+                        self.route_state.mapping_state = "done"
+                        
+                except Exception as e:
+                    print(f"[system] Routing plan failed: {e}")
+                    # Fallback to simple navigation
+                    self.route_state.active = True
+                    self.route_state.destination = destination_name
+                    self.route_state.mapping_state = "pending"  # Always map as fallback
+                    self.route_state.next_instruction = f"Head toward {destination_name}."
 
                 # NOW start vision + obstacle detection
                 print("[system] Starting vision system...")

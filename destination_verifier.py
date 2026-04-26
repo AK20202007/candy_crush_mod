@@ -195,7 +195,7 @@ def get_text_confirmation() -> bool:
         return False
 
 
-def get_voice_confirmation(timeout: float = 5.0) -> bool:
+def get_voice_confirmation(timeout: float = 10.0) -> bool:
     """
     Listen for a spoken 'yes' or 'no' via the microphone using ElevenLabs STT.
     Falls back to text input if voice recognition is unavailable.
@@ -209,20 +209,20 @@ def get_voice_confirmation(timeout: float = 5.0) -> bool:
         return get_text_confirmation()
 
     try:
-        time.sleep(0.3)
+        time.sleep(0.5)
         
         recognizer = sr.Recognizer()
-        recognizer.energy_threshold = 300
+        recognizer.energy_threshold = 150  # More sensitive to quiet speech
         recognizer.dynamic_energy_threshold = True
-        recognizer.pause_threshold = 0.5  # Snappier cut-off when user stops speaking
+        recognizer.pause_threshold = 1.0  # More time for the user to finish their sentence
 
         print("\n[system] 🎤 Say 'correct', 'confirm', or 'yes' to proceed, or 'no' to change destination...")
         print('\a', end='', flush=True)  # Terminal beep to cue the user
 
         try:
             with sr.Microphone() as source:
-                recognizer.adjust_for_ambient_noise(source, duration=0.2)
-                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=5.0)
+                recognizer.adjust_for_ambient_noise(source, duration=0.5)  # Better calibration
+                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=10.0)
                 wav_data = audio.get_wav_data()
         except sr.WaitTimeoutError:
             print("[system] Confirmation timed out (no speech detected).")

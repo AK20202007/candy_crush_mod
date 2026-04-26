@@ -656,7 +656,7 @@ class WayfindingAgent(BaseAgent):
     # Navigation instructions must periodically break through obstacle/surface
     # agents so the user hears where to go. Every N frames we boost priority.
     _frame_counter: int = 0
-    _NAV_BOOST_EVERY: int = 30  # Boost every ~30 frames (~1-2 seconds at typical FPS)
+    _NAV_BOOST_EVERY: int = 12  # Boost every ~12 frames (~3-4 seconds at typical FPS)
 
     def handle(self, ctx: FrameContext) -> Optional[AgentDecision]:
         if not ctx.route.active:
