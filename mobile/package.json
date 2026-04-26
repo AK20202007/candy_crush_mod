@@ -8,7 +8,7 @@
     "start:localhost": "expo start --localhost",
     "start:tunnel": "expo start --tunnel",
     "ios": "expo run:ios",
-    "ios:sim": "expo run:ios --simulator --no-bundler",
+    "ios:sim": "expo run:ios --no-bundler",
     "ios:device": "expo run:ios --device --no-bundler",
     "android": "expo run:android",
     "typecheck": "tsc --noEmit"
