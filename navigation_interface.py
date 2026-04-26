@@ -262,6 +262,8 @@ class NavigationInterface:
                 return (AlertType.WARNING, priority)
         
         elif action == AgentAction.GUIDE:
+            if priority >= 90:
+                return (AlertType.WARNING, priority)
             return (AlertType.GUIDANCE, min(priority, 69))
         
         elif action == AgentAction.ORIENT:
@@ -271,6 +273,8 @@ class NavigationInterface:
             return (AlertType.INFO, priority)
         
         elif action == AgentAction.ASK:
+            if priority >= 90:
+                return (AlertType.WARNING, priority)
             return (AlertType.GUIDANCE, min(priority, 69))
         
         elif action == AgentAction.ESCALATE:

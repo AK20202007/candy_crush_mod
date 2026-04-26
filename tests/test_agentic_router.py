@@ -607,10 +607,117 @@ def test_clear_door_handle_is_announced_with_touch_verification() -> None:
     decision = router.decide(ctx)
 
     assert decision.action == AgentAction.GUIDE
-    assert decision.priority == 77
+    assert decision.priority == 90
     assert "Door handle detected right" in decision.message
     assert "your right hand" in decision.message
     assert "Confirm by touch before opening" in decision.message
+
+
+def test_360_scan_announces_joechencc_model_handle() -> None:
+    router = AgenticNavigationRouter()
+    route = RouteState(
+        active=True,
+        destination="library",
+        next_instruction="Leave the room first",
+        exit_seeking=True,
+        mapping_state="mapping",
+        pending_outdoor_instruction="Head south",
+        pending_outdoor_distance_m=6.0,
+    )
+    ctx = _ctx(
+        route=route,
+        motion=MotionState(is_moving=False, speed_mps=0.0),
+        scene=SceneState(location_type="room", visual_confidence=0.9),
+        surfaces=[
+            SurfaceObservation(
+                kind=SurfaceKind.DOOR,
+                confidence=0.44,
+                direction=Direction.LEFT,
+                distance_m=1.2,
+                source="joechencc-door-parts-handle",
+                attributes={
+                    "handle_detected": True,
+                    "clear_handle": True,
+                    "handle_confidence": 0.41,
+                    "model_label": "handle",
+                    "model_source": "Joechencc/Door_detection",
+                    "recommended_hand": "left",
+                    "handle_side": "left",
+                    "handle_height_zone": "waist height",
+                    "handle_action": "locate the handle by touch, then gently test whether the door pushes or pulls",
+                },
+            )
+        ],
+    )
+
+    decision = router.decide(ctx)
+
+    assert decision.action == AgentAction.GUIDE
+    assert decision.priority == 92
+    assert "Door handle detected left" in decision.message
+    assert "your left hand" in decision.message
+    assert decision.debug["reason"] == "clear-door-handle-during-360-scan"
+    assert route.mapping_state == "done"
+    assert route.exit_seeking is True
+    assert route.next_instruction.startswith("Move toward the detected door handle")
+
+
+def test_exit_route_repeats_detected_handle_and_keeps_outdoor_step() -> None:
+    router = AgenticNavigationRouter()
+    route = RouteState(
+        active=True,
+        destination="library",
+        next_instruction="Leave the room first",
+        exit_seeking=True,
+        mapping_state="done",
+        pending_outdoor_instruction="Head south",
+        pending_outdoor_distance_m=6.0,
+    )
+    handle_ctx = _ctx(
+        route=route,
+        motion=MotionState(is_moving=False, speed_mps=0.0),
+        scene=SceneState(location_type="room", visual_confidence=0.9),
+        surfaces=[
+            SurfaceObservation(
+                kind=SurfaceKind.DOOR,
+                confidence=0.52,
+                direction=Direction.SLIGHT_RIGHT,
+                distance_m=1.2,
+                source="joechencc-door-parts-handle",
+                attributes={
+                    "handle_detected": True,
+                    "clear_handle": True,
+                    "handle_confidence": 0.49,
+                    "model_label": "handle",
+                    "model_source": "Joechencc/Door_detection",
+                    "recommended_hand": "right",
+                    "handle_side": "right",
+                    "handle_height_zone": "waist height",
+                },
+            )
+        ],
+    )
+
+    first = router.decide(handle_ctx)
+
+    assert first.action == AgentAction.GUIDE
+    assert first.priority == 90
+    assert "Door handle detected right" in first.message
+    assert route.next_instruction.startswith("Move toward the detected door handle")
+
+    route_ctx = _ctx(
+        timestamp_ms=BASE_TS_MS + 8000,
+        route=route,
+        motion=MotionState(is_moving=True, speed_mps=0.5),
+        scene=SceneState(location_type="room", visual_confidence=0.9),
+    )
+
+    second = router.decide(route_ctx)
+
+    assert second.action == AgentAction.GUIDE
+    assert "Move toward the detected door handle" in second.message
+    assert "After you are outside" in second.message
+    assert "Head south" in second.message
 
 
 def test_wall_surface_warns_as_obstacle() -> None:
@@ -739,6 +846,8 @@ def main() -> None:
     test_universal_proximity_warning_stops_for_any_close_object()
     test_partial_edge_hazard_warns_when_object_is_cut_off_by_camera()
     test_clear_door_handle_is_announced_with_touch_verification()
+    test_360_scan_announces_joechencc_model_handle()
+    test_exit_route_repeats_detected_handle_and_keeps_outdoor_step()
     test_wall_surface_warns_as_obstacle()
     test_stationary_wall_surface_is_spoken_as_orientation()
     test_route_guidance_uses_walking_steps_not_feet()

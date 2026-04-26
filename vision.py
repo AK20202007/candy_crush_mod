@@ -1193,10 +1193,11 @@ class VisionSystem:
                 support_side="model",
                 near_field_ratio=min(1.0, max((x2 - x1) / max(1.0, w * 0.12), (y2 - y1) / max(1.0, h * 0.14))),
             )
-            handle["clear_handle"] = confidence >= max(0.50, float(self._cfg.door_parts_conf)) and (has_context or confidence >= 0.75)
+            handle["clear_handle"] = True
             handle["has_frame"] = has_context
             handle["model_label"] = "handle"
             handle["model_source"] = "Joechencc/Door_detection"
+            handle["detector_confidence_threshold"] = round(float(self._cfg.door_parts_conf), 3)
 
             observations.append(
                 SurfaceObservation(

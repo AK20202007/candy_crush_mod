@@ -35,21 +35,27 @@ def _get_ip_location_fallback() -> LocationFix:
     raise RuntimeError("Could not determine location from GPS or IP fallback.")
 
 
-def get_current_location(timeout_s: float = 8.0) -> LocationFix:
-    """Return the current macOS Location Services fix.
+_CORE_LOCATION_DELEGATE_CLASS = None
 
-    This requires macOS Location Services permission for the terminal/Python app.
-    The function falls back to IP location on denial, timeout, or missing PyObjC bindings.
+
+def _core_location_delegate_class(NSObject, objc):
+    """Return one reusable PyObjC delegate class.
+
+    PyObjC registers Objective-C classes globally. Defining a nested delegate
+    class on every location poll eventually fails with "overriding existing
+    Objective-C class", so the route refresher must reuse a single class.
     """
-    try:
-        import CoreLocation
-        import objc
-        from Foundation import NSDate, NSObject, NSRunLoop
-    except Exception as exc:
-        print(f"[location_service] CoreLocation bindings unavailable ({exc}). Falling back to IP location.")
-        return _get_ip_location_fallback()
+    global _CORE_LOCATION_DELEGATE_CLASS
+    if _CORE_LOCATION_DELEGATE_CLASS is not None:
+        return _CORE_LOCATION_DELEGATE_CLASS
 
-    class _Delegate(NSObject):
+    try:
+        _CORE_LOCATION_DELEGATE_CLASS = objc.lookUpClass("AssistiveNavLocationDelegate")
+        return _CORE_LOCATION_DELEGATE_CLASS
+    except Exception:
+        pass
+
+    class AssistiveNavLocationDelegate(NSObject):
         fix = None
         error = None
         done = False
@@ -73,6 +79,8 @@ def get_current_location(timeout_s: float = 8.0) -> LocationFix:
             manager.stopUpdatingLocation()
 
         def locationManagerDidChangeAuthorization_(self, manager):  # noqa: N802
+            import CoreLocation
+
             status = manager.authorizationStatus()
             denied = {
                 getattr(CoreLocation, "kCLAuthorizationStatusDenied", 2),
@@ -82,8 +90,30 @@ def get_current_location(timeout_s: float = 8.0) -> LocationFix:
                 self.error = "Location Services permission was denied or restricted."
                 self.done = True
 
+    _CORE_LOCATION_DELEGATE_CLASS = AssistiveNavLocationDelegate
+    return _CORE_LOCATION_DELEGATE_CLASS
+
+
+def get_current_location(timeout_s: float = 8.0) -> LocationFix:
+    """Return the current macOS Location Services fix.
+
+    This requires macOS Location Services permission for the terminal/Python app.
+    The function falls back to IP location on denial, timeout, or missing PyObjC bindings.
+    """
+    try:
+        import CoreLocation
+        import objc
+        from Foundation import NSDate, NSObject, NSRunLoop
+    except Exception as exc:
+        print(f"[location_service] CoreLocation bindings unavailable ({exc}). Falling back to IP location.")
+        return _get_ip_location_fallback()
+
     manager = CoreLocation.CLLocationManager.alloc().init()
-    delegate = _Delegate.alloc().init()
+    delegate_cls = _core_location_delegate_class(NSObject, objc)
+    delegate = delegate_cls.alloc().init()
+    delegate.fix = None
+    delegate.error = None
+    delegate.done = False
     manager.setDelegate_(delegate)
 
     if hasattr(manager, "setDesiredAccuracy_"):

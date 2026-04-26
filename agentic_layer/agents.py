@@ -949,8 +949,9 @@ def _best_clear_door_handle_surface(ctx: FrameContext) -> Optional[SurfaceObserv
                 )
                 or (
                     s.source == "joechencc-door-parts-handle"
-                    and s.confidence >= 0.50
-                    and float(s.attributes.get("handle_confidence", s.confidence) or 0.0) >= 0.45
+                    and str(s.attributes.get("model_label", "")).lower() == "handle"
+                    and s.confidence >= 0.40
+                    and float(s.attributes.get("handle_confidence", s.confidence) or 0.0) >= 0.40
                 )
                 or (
                     s.source == "vision-wall-handle-candidate"
@@ -965,7 +966,7 @@ def _best_clear_door_handle_surface(ctx: FrameContext) -> Optional[SurfaceObserv
     return sorted(
         candidates,
         key=lambda s: (
-            0 if s.source == "vision-door-handle" else 1,
+            {"joechencc-door-parts-handle": 0, "vision-door-handle": 1, "vision-wall-handle-candidate": 2}.get(s.source, 3),
             s.distance_m if s.distance_m is not None else 99.0,
             -s.confidence,
         ),
@@ -1011,6 +1012,16 @@ def _door_handle_guidance_message(surface: SurfaceObservation) -> str:
     return (
         f"Door handle detected {direction}, {distance}{height_phrase}. "
         f"Reach with {hand_phrase}, {action}. Confirm by touch before opening."
+    )
+
+
+def _door_handle_route_instruction(surface: SurfaceObservation) -> str:
+    direction = _direction_phrase(surface.direction)
+    direction_phrase = "straight ahead" if direction == "ahead" else f"to your {direction}"
+    distance = _walking_steps_phrase(surface.distance_m) or _distance_phrase(surface.distance_m)
+    return (
+        f"Move toward the detected door handle {direction_phrase}, {distance}, "
+        "then find it by touch and pass through to exit"
     )
 
 
@@ -1089,9 +1100,11 @@ class EnvironmentMappingAgent(BaseAgent):
             if handle_surface is not None and ctx.scene.is_indoor:
                 ctx.route.mapping_state = "done"
                 ctx.route.exit_seeking = True
+                ctx.route.next_instruction = _door_handle_route_instruction(handle_surface)
+                ctx.route.next_turn_distance_m = None
                 return AgentDecision(
                     action=AgentAction.GUIDE,
-                    priority=91,
+                    priority=92,
                     message=_door_handle_guidance_message(handle_surface),
                     haptic=_door_haptic(handle_surface),
                     agents_consulted=[self.name, "door_handle_scan"],
@@ -1197,9 +1210,11 @@ class ExitSeekingAgent(BaseAgent):
 
         handle_surface = _best_clear_door_handle_surface(ctx)
         if handle_surface is not None:
+            ctx.route.next_instruction = _door_handle_route_instruction(handle_surface)
+            ctx.route.next_turn_distance_m = None
             return AgentDecision(
                 action=AgentAction.GUIDE,
-                priority=77,
+                priority=90,
                 message=_door_handle_guidance_message(handle_surface),
                 haptic=_door_haptic(handle_surface),
                 agents_consulted=[self.name, "door_handle_scan"],
