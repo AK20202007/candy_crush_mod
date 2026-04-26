@@ -6,7 +6,9 @@ from .models import (
     Direction,
     FrameContext,
     HapticPattern,
+    INDOOR_LOCATION_TYPES,
     MotionState,
+    OUTDOOR_LOCATION_TYPES,
     RouteState,
     SceneState,
     SurfaceKind,
@@ -42,6 +44,8 @@ __all__ = [
     "SurfaceObservation",
     "UserState",
     "WarningEvent",
+    "INDOOR_LOCATION_TYPES",
+    "OUTDOOR_LOCATION_TYPES",
     "load_profile",
     "load_profiles",
 ]

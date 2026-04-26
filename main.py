@@ -26,6 +26,10 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+import urllib3
+
+# Suppress unverified HTTPS warnings caused by the macOS SSL workaround
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Load .env file if it exists (API keys)
 _env_path = Path(__file__).parent / ".env"
@@ -40,6 +44,7 @@ if _env_path.exists():
 # Import our improved components
 from agentic_layer import AgenticNavigationRouter
 from agentic_layer.config import DEFAULT_PROFILE_NAME, load_profiles
+from agentic_layer.models import RouteState
 from navigation_interface import NavigationInterface
 from speech_controller import IntelligentSpeechController
 from user_interface import UserMode, UserPreferences
@@ -64,6 +69,7 @@ class NavigationApp:
         self.vision: Optional[VisionSystem] = None
         self.stop_event = threading.Event()
         self.is_running = False
+        self.route_state = RouteState(active=False)
         
         # Status tracking
         self._start_time: Optional[float] = None
@@ -147,21 +153,15 @@ class NavigationApp:
                 camera_mount=args.camera_mount
             )
             
-            def handle_decision(decision):
+            def handle_decision(ctx, decision):
                 """Callback for vision system decisions."""
                 if self.interface and not self.stop_event.is_set():
-                    # Create a minimal frame context
-                    from agentic_layer.models import FrameContext, SceneState
-                    ctx = FrameContext(
-                        timestamp_ms=int(time.time() * 1000),
-                        frame_id=str(time.time()),
-                        scene=SceneState(location_type="sidewalk")
-                    )
                     self.interface.process_decision(decision, ctx)
             
             self.vision = VisionSystem(
                 config=vision_config,
-                on_decision=handle_decision,
+                on_frame_decision=handle_decision,
+                route_provider=lambda: self.route_state,
             )
             
             # Start hardware sensor listeners if available
@@ -179,137 +179,275 @@ class NavigationApp:
             traceback.print_exc()
             return False
     
-    def get_destination(self, args) -> Optional[str]:
-        """Get destination from user via voice or text input."""
-        if args.destination:
-            return args.destination
-        
-        if args.typed_destination or not VOICE_INPUT_AVAILABLE:
-            # Text input
-            print("\n[system] Enter destination (or 'quit' to exit):")
+    def _listen_for_destination(self, prompt: str = "Where would you like to go?", timeout: float = 6.0) -> Optional[str]:
+        """
+        Speak a prompt then record audio and transcribe via ElevenLabs STT.
+        Returns the transcribed text or None on failure.
+        """
+        import requests
+        try:
+            import speech_recognition as sr
+        except ImportError:
+            print("[system] SpeechRecognition module not available, using text input")
+            print(f"[system] {prompt}")
             try:
-                destination = input("> ").strip()
-                if destination.lower() in ['quit', 'exit', 'q']:
-                    return None
-                return destination if destination else None
+                return input("> ").strip() or None
             except EOFError:
                 return None
-        else:
-            # Voice input
-            print("\n[system] Listening for destination...")
-            print("[system] Say your destination clearly after the beep")
-            
-            try:
-                config = DestinationCaptureConfig(
-                    timeout_s=args.voice_timeout,
-                    locale=args.voice_locale
-                )
-                destination = capture_destination_by_voice(config)
-                return destination
-            except VoiceInputError as e:
-                print(f"[system] Voice input failed: {e}")
-                print("[system] Falling back to text input")
-                return self.get_destination(argparse.Namespace(
-                    destination=None,
-                    typed_destination=True,
-                    voice_timeout=args.voice_timeout,
-                    voice_locale=args.voice_locale
-                ))
 
-    def verify_destination(self, raw_destination: str) -> Optional[str]:
+        api_key = os.environ.get("ELEVENLABS_API_KEY", "")
+        if not api_key:
+            print("[system] No ElevenLabs API key — falling back to text input")
+            print(f"[system] {prompt}")
+            try:
+                return input("> ").strip() or None
+            except EOFError:
+                return None
+
+        # Speak the prompt
+        if self.interface:
+            self.interface.speak_info(prompt)
+            timeout = time.time() + 15.0
+            if hasattr(self.interface.speech, 'is_idle'):
+                while not self.interface.speech.is_idle() and time.time() < timeout:
+                    time.sleep(0.1)
+            else:
+                time.sleep(4)
+            self.interface.speech.clear_queues()
+
+        time.sleep(0.5)
+        recognizer = sr.Recognizer()
+        recognizer.energy_threshold = 150
+        recognizer.dynamic_energy_threshold = True
+        recognizer.pause_threshold = 1.0
+
+        print(f"\n[system] 🎤 Listening... (speak now)")
+
+        try:
+            with sr.Microphone() as source:
+                recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=10)
+                wav_data = audio.get_wav_data()
+        except Exception as e:
+            print(f"[system] Microphone error: {e}")
+            return None
+
+        try:
+            response = requests.post(
+                "https://api.elevenlabs.io/v1/speech-to-text",
+                headers={"xi-api-key": api_key},
+                data={"model_id": "scribe_v1"},
+                files={"file": ("audio.wav", wav_data, "audio/wav")},
+                timeout=15,
+                verify=False,  # macOS SSL workaround
+            )
+            import re
+            text = response.json().get("text", "").strip() if response.status_code == 200 else ""
+            
+            # Clean up ElevenLabs STT hallucinations like "(music)" or "[coughing]"
+            cleaned_text = re.sub(r'\([^)]*\)', '', text)
+            cleaned_text = re.sub(r'\[[^\]]*\]', '', cleaned_text)
+            cleaned_text = cleaned_text.strip()
+            
+            if text != cleaned_text:
+                print(f"[system] Raw Heard: '{text}'")
+            print(f"[system] Heard: '{cleaned_text}'")
+            return cleaned_text if cleaned_text else None
+        except Exception as e:
+            print(f"[system] STT error: {e}")
+            return None
+
+    def get_destination(self, args) -> Optional[str]:
+        """Get raw destination text from CLI arg or via voice/text prompt."""
+        if args.destination:
+            return args.destination
+
+        # No CLI destination — ask via voice
+        result = self._listen_for_destination("Please give a destination.")
+        if result:
+            return result
+
+        # Voice failed — fall back to text
+        print("\n[system] Enter destination (or 'quit' to exit):")
+        try:
+            text = input("> ").strip()
+            return None if text.lower() in ('quit', 'exit', 'q', '') else text
+        except EOFError:
+            return None
+
+    def verify_destination(self, raw_destination: str, lat: Optional[float] = None, lng: Optional[float] = None) -> Optional[dict]:
         """
         Look up the destination on Google Maps, announce it via audio,
-        and wait for the user to confirm before proceeding.
-        
-        Returns the verified destination name, or None if rejected.
+        listen for spoken yes/no confirmation.
+
+        Returns a dict with:
+            name       - verified place name
+            address    - full formatted address
+            lat        - latitude (float or None)
+            lng        - longitude (float or None)
+        or None if the user rejected.
         """
         print(f"[system] Looking up '{raw_destination}' on Google Maps...")
-        
-        result = search_destination(raw_destination)
-        
-        if result is None:
-            msg = f"Sorry, I could not find {raw_destination} on the map. Please try again."
+
+        result = search_destination(raw_destination, lat=lat, lng=lng)
+        if not result:
+            msg = f"Sorry, I could not find {raw_destination}. Please try again."
             print(f"[system] {msg}")
             if self.interface:
                 self.interface.speak_warning(msg)
-                time.sleep(3)  # Let TTS finish
+                time.sleep(3)
             return None
-        
-        # Announce what we found
-        confirm_msg = format_confirmation_message(result)
+
+        # Build and speak confirmation message
+        confirm_msg = f"Navigating to {result['name']}. Is this correct?"
         print(f"[system] {confirm_msg}")
-        
+
         if self.interface:
             self.interface.speak_info(confirm_msg)
-            # Wait for TTS to fully finish playing before starting microphone
-            time.sleep(8)
-            # Clear any leftover audio state
+            timeout = time.time() + 15.0
+            if hasattr(self.interface.speech, 'is_idle'):
+                while not self.interface.speech.is_idle() and time.time() < timeout:
+                    time.sleep(0.1)
+            else:
+                time.sleep(4)
             self.interface.speech.clear_queues()
-        
-        # Wait for voice confirmation
+
+        # Listen for yes/no using the robust sounddevice verifier
         confirmed = get_voice_confirmation()
-        
+
         if confirmed:
-            verified_name = result.get("name", raw_destination)
-            print(f"[system] Destination confirmed: {verified_name}")
+            print(f"[system] ✓ Destination confirmed: {result['name']} | {result['address']} | lat={result['lat']} lng={result['lng']}")
             if self.interface:
-                self.interface.speak_info(f"Great. Starting navigation to {verified_name}.")
+                self.interface.speak_info(f"Great. Starting navigation to {result['name']}.")
                 time.sleep(2)
-            return verified_name
+            return result
         else:
-            print("[system] Destination rejected. Please enter a new one.")
+            print("[system] Destination rejected. Please try again.")
             if self.interface:
-                self.interface.speak_info("OK, please enter a different destination.")
+                self.interface.speak_info("OK, let me know where you would like to go.")
                 time.sleep(2)
             return None
-    
+
     def run(self, args) -> int:
         """Main application loop."""
         if not self.initialize(args):
             return 1
-        
+
         self.setup_signal_handlers()
         self.is_running = True
         self._start_time = time.time()
-        
+
+        # Final confirmed destination data
+        self.confirmed_destination: Optional[dict] = None
+
         try:
-            # Main loop
             while not self.stop_event.is_set():
-                # Get raw destination input
+                # Try to fetch GPS location to bias the search (5 mile radius)
+                current_lat = None
+                current_lng = None
+                if not args.destination:
+                    try:
+                        import location_service
+                        loc = location_service.get_current_location(timeout_s=5.0)
+                        current_lat = loc.latitude
+                        current_lng = loc.longitude
+                        print(f"[system] GPS bias acquired: {current_lat}, {current_lng}")
+                    except Exception as e:
+                        print(f"[system] Could not fetch GPS location for search bias: {e}")
+
+                # Get raw destination input (voice or CLI)
                 raw_destination = self.get_destination(args)
-                
+
                 if raw_destination is None:
                     print("[system] No destination provided, exiting")
                     break
-                
-                # Verify destination via Google Maps + audio confirmation
-                # Keep asking until user confirms or quits
-                verified_destination = None
-                while verified_destination is None and not self.stop_event.is_set():
-                    verified_destination = self.verify_destination(raw_destination)
-                    if verified_destination is None:
+
+                # Keep asking until user verbally confirms
+                destination_data = None
+                while destination_data is None and not self.stop_event.is_set():
+                    destination_data = self.verify_destination(raw_destination, lat=current_lat, lng=current_lng)
+                    if destination_data is None:
                         # Ask for a new destination
-                        raw_destination = self.get_destination(argparse.Namespace(
-                            destination=None,
-                            typed_destination=True,
-                            voice_timeout=getattr(args, 'voice_timeout', 8.0),
-                            voice_locale=getattr(args, 'voice_locale', 'en_US')
-                        ))
+                        raw_destination = self._listen_for_destination("Please give a destination.")
+                        if raw_destination is None:
+                            # Voice failed — text fallback
+                            print("\n[system] Enter destination (or 'quit' to exit):")
+                            try:
+                                raw_destination = input("> ").strip() or None
+                            except EOFError:
+                                raw_destination = None
                         if raw_destination is None:
                             break
-                
-                if verified_destination is None:
+
+                if destination_data is None:
                     print("[system] No destination confirmed, exiting")
                     break
-                
-                # NOW start navigation with the confirmed destination
-                print(f"\n[system] Starting navigation to: {verified_destination}")
-                self.interface.set_destination(verified_destination)
-                
-                # Run vision system (obstacle detection starts HERE, not before)
+
+                # Store confirmed destination with all data
+                self.confirmed_destination = destination_data
+                destination_name = destination_data["name"]
+                destination_address = destination_data["address"]
+                destination_lat = destination_data["lat"]
+                destination_lng = destination_data["lng"]
+
+                print(f"\n[system] Starting navigation to: {destination_name}")
+                print(f"[system]   Address : {destination_address}")
+                print(f"[system]   Coords  : lat={destination_lat}, lng={destination_lng}")
+
+                # Plan the route using the professional NavigationPlanner
+                try:
+                    from address_navigation import NavigationPlanner, LegType
+                    from gps_location import GPSCoords
+                    
+                    ors_key = (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip() or None
+                    indoor_layout = os.environ.get("INDOOR_LAYOUT_JSON")
+                    planner = NavigationPlanner(
+                        ors_key=ors_key,
+                        indoor_graph_path=indoor_layout,
+                    )
+                    
+                    # Prepare origin and destination data
+                    origin_gps = None
+                    if current_lat and current_lng:
+                        origin_gps = GPSCoords(latitude=current_lat, longitude=current_lng)
+                    
+                    dest_gps = None
+                    if destination_lat and destination_lng:
+                        dest_gps = GPSCoords(latitude=destination_lat, longitude=destination_lng)
+                    
+                    # Generate the plan
+                    plan = planner.plan("Your current location", destination_name, origin_gps=origin_gps, dest_gps=dest_gps)
+                    
+                    # Initialize route state
+                    self.route_state.active = True
+                    self.route_state.destination = destination_name
+                    
+                    # If we have specific steps, use the first one
+                    all_steps = plan.all_steps()
+                    if all_steps:
+                        self.route_state.next_instruction = all_steps[0]
+                    else:
+                        self.route_state.next_instruction = f"Head toward {destination_name}."
+                    
+                    # Trigger 360-degree mapping if starting indoors
+                    if plan.origin_is_indoor:
+                        self.route_state.mapping_state = "pending"
+                        print("[system] Starting indoors. Mapping required.")
+                    else:
+                        self.route_state.mapping_state = "done"
+                        
+                except Exception as e:
+                    print(f"[system] Routing plan failed: {e}")
+                    # Fallback to simple navigation
+                    self.route_state.active = True
+                    self.route_state.destination = destination_name
+                    self.route_state.mapping_state = "pending"  # Always map as fallback
+                    self.route_state.next_instruction = f"Head toward {destination_name}."
+
+                # NOW start vision + obstacle detection
                 print("[system] Starting vision system...")
-                print("[system] Press Ctrl+C to stop, or say 'stop'")
-                
+                print("[system] Press Ctrl+C to stop")
+
                 try:
                     frames = self.vision.run_forever(
                         camera_index=args.camera,
@@ -320,12 +458,10 @@ class NavigationApp:
                 except KeyboardInterrupt:
                     print("\n[system] Interrupted by user")
                     break
-                
-                # Clear destination and ask for new one
+
                 self.interface.clear_destination()
+                self.confirmed_destination = None
                 print("\n[system] Navigation ended. Set a new destination or Ctrl+C to quit")
-                
-                # Reset args.destination so we prompt again
                 args.destination = None
                 
         except Exception as e:
@@ -479,6 +615,21 @@ Examples:
         choices=["head", "hand"],
         help="Camera mount position: 'head' for glasses/head-mounted, 'hand' for phone (default: hand)."
     )
+
+    # Address-to-address navigation
+    nav_group = parser.add_argument_group("Address Navigation")
+    nav_group.add_argument(
+        "--from-address",
+        type=str,
+        default=None,
+        help="Starting address for address-to-address navigation",
+    )
+    nav_group.add_argument(
+        "--to-address",
+        type=str,
+        default=None,
+        help="Destination address for address-to-address navigation",
+    )
     
     return parser
 
@@ -487,7 +638,36 @@ def main():
     """Main entry point."""
     parser = build_parser()
     args = parser.parse_args()
-    
+
+    # Address-to-address navigation planning
+    if getattr(args, "from_address", None) and getattr(args, "to_address", None):
+        try:
+            from address_navigation import NavigationPlanner, LegType
+
+            ors_key = (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip() or None
+            indoor_layout = os.environ.get("INDOOR_LAYOUT_JSON")
+            planner = NavigationPlanner(
+                ors_api_key=ors_key,
+                indoor_layout_path=indoor_layout,
+            )
+            plan = planner.plan(args.from_address, args.to_address)
+            print(f"\n{'=' * 60}")
+            print(f"NAVIGATION PLAN: {plan.origin} -> {plan.destination}")
+            print(f"  Origin indoor : {plan.origin_is_indoor}")
+            print(f"  Dest indoor   : {plan.destination_is_indoor}")
+            print(f"  Total steps   : {plan.total_steps}")
+            print(f"{'=' * 60}")
+            for i, leg in enumerate(plan.legs, 1):
+                print(f"\nLeg {i} ({leg.leg_type.value}):")
+                if leg.exit_strategy:
+                    print(f"  Exit strategy: {leg.exit_strategy.value}")
+                for step in leg.steps:
+                    print(f"    - {step}")
+        except Exception as exc:
+            print(f"[address-nav] Planning failed: {exc}")
+            import traceback
+            traceback.print_exc()
+
     app = NavigationApp()
     return app.run(args)
 

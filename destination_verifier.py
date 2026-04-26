@@ -44,6 +44,8 @@ def search_destination(
     query: str,
     api_key: Optional[str] = None,
     timeout_s: float = 10.0,
+    lat: Optional[float] = None,
+    lng: Optional[float] = None,
 ) -> Optional[dict]:
     """
     Search for a destination using available APIs.
@@ -55,7 +57,7 @@ def search_destination(
     
     # Try Google Places first (richest results)
     if google_key:
-        result = _places_text_search(google_key, query, timeout_s)
+        result = _places_text_search(google_key, query, timeout_s, lat, lng)
         if result:
             return result
         # Try Google Geocoding
@@ -74,11 +76,13 @@ def search_destination(
     return {"name": query, "address": "", "lat": None, "lng": None}
 
 
-def _places_text_search(api_key: str, query: str, timeout_s: float) -> Optional[dict]:
+def _places_text_search(api_key: str, query: str, timeout_s: float, lat: Optional[float] = None, lng: Optional[float] = None) -> Optional[dict]:
     """Search using Google Places Text Search API."""
     q = quote(query.strip(), safe="")
     k = quote(api_key.strip(), safe="")
     url = f"{GOOGLE_PLACES_TEXTSEARCH}?query={q}&key={k}"
+    if lat is not None and lng is not None:
+        url += f"&location={lat},{lng}&radius=8047"
 
     try:
         req = urllib.request.Request(url, headers={"Accept": "application/json"}, method="GET")
@@ -191,7 +195,7 @@ def get_text_confirmation() -> bool:
         return False
 
 
-def get_voice_confirmation(timeout: float = 5.0) -> bool:
+def get_voice_confirmation(timeout: float = 10.0) -> bool:
     """
     Listen for a spoken 'yes' or 'no' via the microphone using ElevenLabs STT.
     Falls back to text input if voice recognition is unavailable.
@@ -199,78 +203,74 @@ def get_voice_confirmation(timeout: float = 5.0) -> bool:
     ELEVENLABS_API_KEY = (os.environ.get("ELEVENLABS_API_KEY") or "").strip()
     
     try:
-        import sounddevice as sd
-        import numpy as np
-        import wave
-        import tempfile
+        import speech_recognition as sr
     except ImportError:
         print("[system] Audio recording not available, using text input")
         return get_text_confirmation()
 
     try:
-        # Make sure no audio is playing before recording
+        time.sleep(0.5)
+        
+        recognizer = sr.Recognizer()
+        recognizer.energy_threshold = 150  # More sensitive to quiet speech
+        recognizer.dynamic_energy_threshold = True
+        recognizer.pause_threshold = 1.0  # More time for the user to finish their sentence
+
+        print("\n[system] 🎤 Say 'correct', 'confirm', or 'yes' to proceed, or 'no' to change destination...")
+        print('\a', end='', flush=True)  # Terminal beep to cue the user
+
         try:
-            sd.stop()
-        except Exception:
-            pass
-        time.sleep(0.3)
-        
-        print("\n[system] 🎤 Say 'yes' to confirm or 'no' to change destination...")
-        
-        # Record 3 seconds of audio (enough for "yes" or "no")
-        samplerate = 16000
-        recording = sd.rec(
-            int(samplerate * 3),
-            samplerate=samplerate,
-            channels=1,
-            dtype=np.int16
-        )
-        sd.wait()
-        
-        # Save to temp wav file
-        temp_path = tempfile.mktemp(suffix=".wav")
-        with wave.open(temp_path, 'wb') as wav_file:
-            wav_file.setnchannels(1)
-            wav_file.setsampwidth(2)
-            wav_file.setframerate(samplerate)
-            wav_file.writeframes(recording.tobytes())
+            with sr.Microphone() as source:
+                recognizer.adjust_for_ambient_noise(source, duration=0.5)  # Better calibration
+                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=10.0)
+                wav_data = audio.get_wav_data()
+        except sr.WaitTimeoutError:
+            print("[system] Confirmation timed out (no speech detected).")
+            return False
+        except Exception as e:
+            print(f"[system] Microphone error: {e}")
+            return False
         
         # Send to ElevenLabs STT
         import requests
-        with open(temp_path, 'rb') as f:
-            response = requests.post(
-                "https://api.elevenlabs.io/v1/speech-to-text",
-                headers={"xi-api-key": ELEVENLABS_API_KEY},
-                data={"model_id": "scribe_v1"},
-                files={"file": f},
-                timeout=15
-            )
-        
-        # Clean up temp file
-        try:
-            os.remove(temp_path)
-        except OSError:
-            pass
+        response = requests.post(
+            "https://api.elevenlabs.io/v1/speech-to-text",
+            headers={"xi-api-key": ELEVENLABS_API_KEY},
+            data={"model_id": "scribe_v1"},
+            files={"file": ("audio.wav", wav_data, "audio/wav")},
+            timeout=15,
+            verify=False,  # macOS SSL workaround
+        )
         
         if response.status_code == 200:
+            import re
             text = response.json().get("text", "").strip().lower()
-            print(f"[system] Heard: '{text}'")
             
-            if not text:
+            # Clean up ElevenLabs STT hallucinations like "(music)" or "[coughing]"
+            cleaned_text = re.sub(r'\([^)]*\)', '', text)
+            cleaned_text = re.sub(r'\[[^\]]*\]', '', cleaned_text)
+            cleaned_text = cleaned_text.strip()
+            
+            if text != cleaned_text:
+                print(f"[system] Raw Heard: '{text}'")
+            print(f"[system] Heard: '{cleaned_text}'")
+            
+            if not cleaned_text:
                 print("[system] No speech detected. Falling back to text input.")
                 return get_text_confirmation()
             
-            yes_words = {"yes", "yeah", "yep", "correct", "confirm", "ok", "okay", "sure", "right", "affirmative"}
-            no_words = {"no", "nope", "nah", "wrong", "incorrect", "change", "cancel"}
+            yes_words = {"yes", "yeah", "yep", "yup", "ya", "correct", "confirm", "ok", "okay", "sure", "right", "affirmative", "absolutely", "indeed"}
+            no_words = {"no", "nope", "nah", "wrong", "incorrect", "change", "cancel", "negative"}
             
+            # Use word boundaries so "no" doesn't match "now" or "nothing"
             for word in yes_words:
-                if word in text:
+                if re.search(rf'\b{word}\b', cleaned_text):
                     return True
             for word in no_words:
-                if word in text:
+                if re.search(rf'\b{word}\b', cleaned_text):
                     return False
             
-            print(f"[system] Didn't understand '{text}'. Falling back to text input.")
+            print(f"[system] Didn't understand '{cleaned_text}'. Falling back to text input.")
             return get_text_confirmation()
         else:
             print(f"[system] ElevenLabs STT error: {response.status_code}")

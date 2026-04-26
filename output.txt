@@ -1,3 +1,0 @@
-=== Assistive Navigation Prototype ===
-Loading speech engine...
-Enter destination (place name or address; mock text if not using maps): 
