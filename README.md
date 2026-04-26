@@ -20,6 +20,19 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### Phone / laptop thin client (stream frames to this machine)
+
+Runs YOLO + router here; a browser on your phone sends JPEGs and speaks responses locally.
+
+```bash
+python3 -m pip install -r requirements.txt
+python3 stream_server.py
+```
+
+Open `http://localhost:8765` (or `http://<this-computer-LAN-IP>:8765`). Mobile cameras usually need **HTTPS** on non-localhost; use e.g. `ngrok http 8765` and open the https URL on the phone.
+
+**Expo Go app (same API):** `cd mobile-stream && npm install && npm run start` (LAN Metro) or **`npm run start:tunnel`** if the QR host is unreachable. **iPhone + Expo Go:** plain `http://192.168…` to `stream_server` often **times out**. On the Mac, with `stream_server.py` already listening on **8765**, run **`brew install cloudflared`** once, then **`./scripts/tunnel_stream_server.sh`** (or `cloudflared tunnel --url http://127.0.0.1:8765`). Paste the printed **`https://….trycloudflare.com`** origin into the app (no path) and tap **Ping server**. (ngrok works too if you prefer it.)
+
 ### 3. Enter Your Destination
 
 When prompted, type where you want to go:

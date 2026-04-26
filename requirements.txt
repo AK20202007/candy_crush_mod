@@ -3,6 +3,11 @@ ultralytics>=8.0.0
 pyttsx3>=2.90
 pymongo>=4.6.0
 
+# Thin-client frame streaming server (stream_server.py)
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+python-multipart>=0.0.9
+
 # ElevenLabs Speech Integration
 elevenlabs>=1.0.0
 sounddevice>=0.4.6

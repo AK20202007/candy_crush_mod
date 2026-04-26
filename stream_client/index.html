@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>Assistive Nav — phone stream</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; background: #111; color: #eee; }
+    body { margin: 0; padding: 12px; max-width: 560px; margin-inline: auto; }
+    h1 { font-size: 1.1rem; font-weight: 600; }
+    label { display: block; margin-top: 10px; font-size: 0.85rem; color: #aaa; }
+    input, button { width: 100%; box-sizing: border-box; padding: 10px; margin-top: 6px; border-radius: 8px; border: 1px solid #444; background: #222; color: #fff; }
+    button { background: #2a6bfd; border: none; font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    #preview { width: 100%; border-radius: 8px; margin-top: 12px; background: #000; }
+    #log { font-size: 0.75rem; color: #888; margin-top: 12px; white-space: pre-wrap; max-height: 160px; overflow: auto; }
+    .warn { color: #f90; font-size: 0.8rem; margin-top: 10px; line-height: 1.4; }
+    .row { display: flex; gap: 8px; margin-top: 8px; }
+    .row button { flex: 1; }
+  </style>
+</head>
+<body>
+  <h1>Stream camera → laptop (thin client)</h1>
+  <p class="warn">
+    If the page <strong>spins forever</strong>, open <code>http://…/ping</code> on the phone first (same host/port as this app).
+    You should see <code>{"status":"ok"}</code> in under a second. If not, the phone cannot reach your laptop (wrong IP, different Wi‑Fi, or macOS Firewall blocking Python).
+    <br /><br />
+    Mobile browsers require a <strong>secure context</strong> for camera (HTTPS or localhost).
+    For camera access over Wi‑Fi, use TLS (e.g. <code>ngrok http 8765</code>) and open the <strong>https</strong> URL on the phone.
+  </p>
+
+  <label>Server base URL (no trailing slash)</label>
+  <input id="baseUrl" type="text" placeholder="http://192.168.1.10:8765" />
+
+  <label>Destination (for route-aware guidance)</label>
+  <input id="destination" type="text" value="Library" />
+
+  <div class="row">
+    <button type="button" id="btnSession">Create session</button>
+    <button type="button" id="btnStream" disabled>Start streaming</button>
+  </div>
+  <div class="row">
+    <button type="button" id="btnStop" disabled>Stop</button>
+  </div>
+
+  <video id="video" playsinline muted style="display:none"></video>
+  <canvas id="canvas" style="display:none"></canvas>
+  <img id="preview" alt="Last frame preview" />
+
+  <div id="log"></div>
+
+  <script>
+    const baseUrl = document.getElementById('baseUrl');
+    const destination = document.getElementById('destination');
+    const btnSession = document.getElementById('btnSession');
+    const btnStream = document.getElementById('btnStream');
+    const btnStop = document.getElementById('btnStop');
+    const video = document.getElementById('video');
+    const canvas = document.getElementById('canvas');
+    const preview = document.getElementById('preview');
+    const logEl = document.getElementById('log');
+
+    baseUrl.value = window.location.origin.replace(/\/$/, '');
+
+    let sessionId = null;
+    let streaming = false;
+    let timer = null;
+    let lastSpoken = '';
+    let lastSpokenAt = 0;
+
+    function log(msg) {
+      logEl.textContent = (new Date()).toISOString().slice(11, 19) + ' ' + msg + '\n' + logEl.textContent;
+    }
+
+    function maybeSpeak(text, priority) {
+      if (!text) return;
+      const now = Date.now();
+      const urgent = priority >= 95;
+      if (!urgent && text === lastSpoken && now - lastSpokenAt < 3500) return;
+      lastSpoken = text;
+      lastSpokenAt = now;
+      try {
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        u.rate = 1.0;
+        window.speechSynthesis.speak(u);
+      } catch (e) {
+        log('speech error: ' + e);
+      }
+    }
+
+    btnSession.onclick = async () => {
+      const root = baseUrl.value.trim().replace(/\/$/, '');
+      const fd = new FormData();
+      fd.append('destination', destination.value.trim() || 'Unknown');
+      try {
+        const r = await fetch(root + '/stream/session', { method: 'POST', body: fd });
+        if (!r.ok) throw new Error(await r.text());
+        const j = await r.json();
+        sessionId = j.session_id;
+        log('session ' + sessionId);
+        btnStream.disabled = false;
+      } catch (e) {
+        log('session failed: ' + e);
+        sessionId = null;
+        btnStream.disabled = true;
+      }
+    };
+
+    async function sendFrame() {
+      if (!streaming || !sessionId) return;
+      const root = baseUrl.value.trim().replace(/\/$/, '');
+      const w = video.videoWidth;
+      const h = video.videoHeight;
+      if (w < 2 || h < 2) return;
+      canvas.width = Math.min(w, 960);
+      canvas.height = Math.round((canvas.width / w) * h);
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.55));
+      const fd = new FormData();
+      fd.append('session_id', sessionId);
+      fd.append('image', blob, 'frame.jpg');
+      try {
+        const r = await fetch(root + '/stream/frame', { method: 'POST', body: fd });
+        if (!r.ok) throw new Error(await r.text());
+        const j = await r.json();
+        preview.src = URL.createObjectURL(blob);
+        const d = j.decision || {};
+        if (j.speak) maybeSpeak(d.message || '', d.priority || 0);
+        if (d.action && d.action !== 'silent') log(d.action + ' p=' + d.priority + ' ' + (d.message || '').slice(0, 80));
+      } catch (e) {
+        log('frame error: ' + e);
+      }
+    }
+
+    btnStream.onclick = async () => {
+      if (!sessionId) return;
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 960 } },
+          audio: false,
+        });
+        video.srcObject = stream;
+        await video.play();
+        streaming = true;
+        btnStream.disabled = true;
+        btnStop.disabled = false;
+        timer = setInterval(sendFrame, 450);
+        log('camera on');
+      } catch (e) {
+        log('getUserMedia failed (try HTTPS / localhost): ' + e);
+      }
+    };
+
+    btnStop.onclick = () => {
+      streaming = false;
+      if (timer) clearInterval(timer);
+      timer = null;
+      if (video.srcObject) {
+        video.srcObject.getTracks().forEach((t) => t.stop());
+        video.srcObject = null;
+      }
+      btnStream.disabled = !sessionId;
+      btnStop.disabled = true;
+      log('stopped');
+    };
+  </script>
+</body>
+</html>

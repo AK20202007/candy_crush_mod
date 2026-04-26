@@ -348,7 +348,8 @@ class VisionSystem:
 
         self._consec_warning_hits: Dict[str, int] = {}
         self._last_spoken: Optional[str] = None
-        
+        self._last_frame_context: Optional[FrameContext] = None
+
         self._motion_fall_detector = MotionFallDetector()
         self._smv_fall_detector = SignalMagnitudeFallDetector()
 
@@ -465,11 +466,13 @@ class VisionSystem:
                     self._on_frame_decision(ctx, decision)
                 except Exception as e:
                     print(f"[vision] Frame decision callback error: {e}")
+            self._last_frame_context = ctx
             return decision
         except Exception as e:
             print(f"[vision] CRITICAL: Frame processing failed: {e}")
             import traceback
             traceback.print_exc()
+            self._last_frame_context = None
             # Return a safe fallback decision to prevent complete system failure
             from agentic_layer.models import AgentDecision, AgentAction, HapticPattern
             return AgentDecision(
@@ -480,6 +483,29 @@ class VisionSystem:
                 agents_consulted=["vision_error"],
                 debug={"error": str(e)},
             )
+
+    def process_frame_numpy(
+        self,
+        frame_bgr: np.ndarray,
+        route: Optional[RouteState] = None,
+    ) -> AgentDecision:
+        """
+        Run a single YOLO + router pass on a BGR image (e.g. JPEG decoded from a phone).
+
+        ``frame_bgr`` is copied internally so annotation overlays do not mutate the input.
+        If ``route`` is given, it is used for this frame only (session destination from client).
+        """
+        if frame_bgr.ndim != 3 or frame_bgr.shape[2] != 3:
+            raise ValueError("frame_bgr must be a BGR uint8 array with shape HxWx3")
+        h, w = frame_bgr.shape[:2]
+        work = frame_bgr.copy()
+        prev_provider = self._route_provider
+        if route is not None:
+            self._route_provider = lambda r=route: r
+        try:
+            return self._process_frame(work, w, h)
+        finally:
+            self._route_provider = prev_provider
 
     def handle_sensor_fall(self, reason: str, priority: int = 10) -> None:
         """Triggered by hardware sensors; starts the warning/alarm cycle."""
