@@ -134,10 +134,12 @@ class VisionConfig:
     confirm_frames: int = 2
     conf: float = 0.35
     iou: float = 0.5
-    imgsz: int = 640
+    imgsz: int = 416
     half: Optional[bool] = None
     augment: bool = False
     max_det: int = 50
+    target_fps: float = 6.0
+    show_preview: bool = False
 
     # Demo defaults. On a phone these should come from IMU/GPS/user state.
     assume_moving: bool = True
@@ -163,6 +165,7 @@ class VisionConfig:
     # conservative; production sidewalk navigation should replace or supplement
     # it with segmentation + depth.
     enable_surface_heuristic: bool = True
+    surface_every_n_frames: int = 3
 
     @property
     def is_head_mounted(self) -> bool:
@@ -349,7 +352,11 @@ class VisionSystem:
             self._class_ids = sorted(self._name_to_id[n] for n in self._active_classes)
 
         self._consec_warning_hits: Dict[str, int] = {}
+        self._consec_door_hits = 0
+        self._door_candidate_key: Optional[str] = None
         self._last_spoken: Optional[str] = None
+        self._processed_frames = 0
+        self._cached_surfaces: List[SurfaceObservation] = []
         
         self._motion_fall_detector = MotionFallDetector()
         self._smv_fall_detector = SignalMagnitudeFallDetector()
@@ -361,7 +368,8 @@ class VisionSystem:
             f"[vision] Inference: imgsz={self._cfg.imgsz} conf={self._cfg.conf} "
             f"iou={self._cfg.iou} tracked_classes={len(self._active_classes) or 'all'} "
             f"half={self._predict_half} augment={self._cfg.augment} "
-            f"confirm_frames={self._cfg.confirm_frames}"
+            f"confirm_frames={self._cfg.confirm_frames} target_fps={self._cfg.target_fps} "
+            f"preview={self._cfg.show_preview}"
         )
 
     def active_class_labels(self) -> Set[str]:
@@ -371,8 +379,12 @@ class VisionSystem:
         cap = cv2.VideoCapture(camera_index, cv2.CAP_AVFOUNDATION)
         if not cap.isOpened():
             raise RuntimeError(f"Could not open webcam index {camera_index}")
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        print("[vision] Webcam open. Press 'q' in the preview window or Ctrl+C in the terminal to quit.")
+        if self._cfg.show_preview:
+            print("[vision] Webcam open. Press 'q' in the preview window or Ctrl+C in the terminal to quit.")
+        else:
+            print("[vision] Webcam open. Preview disabled for lower lag; rerun with --preview to show the window.")
 
         frame_count = 0
         last_fps_time = time.time()
@@ -381,9 +393,10 @@ class VisionSystem:
 
         try:
             while stop_event is None or not stop_event.is_set():
+                loop_started = time.time()
                 try:
                     # Flush buffer to ensure real-time frame
-                    for _ in range(5):
+                    for _ in range(2):
                         cap.grab()
                     
                     ret, frame = cap.read()
@@ -395,7 +408,7 @@ class VisionSystem:
                     w, h = frame.shape[1], frame.shape[0]
                     decision = self._process_frame(frame, w, h)
                     
-                    if decision.should_speak and decision.message:
+                    if self._on_decision is not None and decision.should_speak and decision.message:
                         self._last_spoken = decision.message
                         self._on_decision(decision)
 
@@ -413,11 +426,18 @@ class VisionSystem:
                         print(f"[vision] Health check: processed {frame_count} frames, system stable")
                         last_health_check = now
 
-                    cv2.imshow("Assistive Nav — preview", frame)
-                    key = cv2.waitKey(1) & 0xFF
-                    if key == ord("q"):
-                        print("[vision] Quit requested from preview window.")
-                        break
+                    if self._cfg.show_preview:
+                        cv2.imshow("Assistive Nav — preview", frame)
+                        key = cv2.waitKey(1) & 0xFF
+                        if key == ord("q"):
+                            print("[vision] Quit requested from preview window.")
+                            break
+
+                    if self._cfg.target_fps > 0:
+                        min_interval = 1.0 / self._cfg.target_fps
+                        elapsed = time.time() - loop_started
+                        if elapsed < min_interval:
+                            time.sleep(min_interval - elapsed)
                 except Exception as e:
                     print(f"[vision] Frame processing error: {e}")
                     import traceback
@@ -433,7 +453,8 @@ class VisionSystem:
         finally:
             print("[vision] Shutting down...")
             cap.release()
-            cv2.destroyAllWindows()
+            if self._cfg.show_preview:
+                cv2.destroyAllWindows()
             print(f"[vision] Processed {frame_count} frames total")
         return frame_count
 
@@ -465,14 +486,16 @@ class VisionSystem:
     def _process_frame(self, frame: np.ndarray, w: int, h: int) -> AgentDecision:
         try:
             now_ms = int(time.time() * 1000)
+            self._processed_frames += 1
             detections = self._detect(frame, w, h)
             location_type = self._infer_location_type(detections)
             warnings = self._warnings_from_detections(detections, now_ms)
-            surfaces = self._surface_observations(frame, w, h) if self._cfg.enable_surface_heuristic else []
+            surfaces = self._surface_observations_for_frame(frame, w, h) if self._cfg.enable_surface_heuristic else []
             if location_type in INDOOR_LOCATION_TYPES:
                 surfaces = [s for s in surfaces if s.kind not in {SurfaceKind.ROAD, SurfaceKind.SIDEWALK, SurfaceKind.CROSSWALK}]
-            for surface in surfaces:
-                self._draw_surface_observation(frame, surface)
+            if self._cfg.show_preview:
+                for surface in surfaces:
+                    self._draw_surface_observation(frame, surface)
             ctx = FrameContext(
                 timestamp_ms=now_ms,
                 frame_id=str(time.time()),
@@ -489,10 +512,13 @@ class VisionSystem:
                 last_spoken=self._last_spoken,
             )
             decision = self._router.decide(ctx)
-            self._draw_decision(frame, decision)
+            if self._cfg.show_preview:
+                self._draw_decision(frame, decision)
             if self._on_frame_decision is not None:
                 try:
-                    self._on_frame_decision(ctx, decision)
+                    spoken = self._on_frame_decision(ctx, decision)
+                    if spoken and decision.message:
+                        self._last_spoken = decision.message
                 except Exception as e:
                     print(f"[vision] Frame decision callback error: {e}")
             return decision
@@ -510,6 +536,14 @@ class VisionSystem:
                 agents_consulted=["vision_error"],
                 debug={"error": str(e)},
             )
+
+    def _surface_observations_for_frame(self, frame: np.ndarray, w: int, h: int) -> List[SurfaceObservation]:
+        n = max(1, int(self._cfg.surface_every_n_frames))
+        route = self._route_state()
+        scan_needs_surface = getattr(route, "mapping_state", "done") != "done" or getattr(route, "exit_seeking", False)
+        if self._processed_frames == 1 or scan_needs_surface or self._processed_frames % n == 0:
+            self._cached_surfaces = self._surface_observations(frame, w, h)
+        return list(self._cached_surfaces)
 
     def handle_sensor_fall(self, reason: str, priority: int = 10) -> None:
         """Triggered by hardware sensors; starts the warning/alarm cycle."""
@@ -567,7 +601,8 @@ class VisionSystem:
             )
             self._augment_signal_attributes(frame, det)
             detections.append(det)
-            self._draw_detection(frame, det)
+            if self._cfg.show_preview:
+                self._draw_detection(frame, det)
 
         return detections
 
@@ -629,7 +664,8 @@ class VisionSystem:
             key = f"{warning.kind}:{warning.message}:{warning.direction.value}:{_distance_bucket(warning.distance_m)}"
             current_keys.add(key)
             self._consec_warning_hits[key] = self._consec_warning_hits.get(key, 0) + 1
-            if self._consec_warning_hits[key] >= n_confirm:
+            immediate_contact = warning.distance_m is not None and warning.distance_m <= 0.8
+            if immediate_contact or self._consec_warning_hits[key] >= n_confirm:
                 confirmed.append(warning)
 
         # Decay counters for warnings no longer visible.
@@ -711,6 +747,16 @@ class VisionSystem:
                 observations.append(door)
         except Exception as e:
             print(f"[vision] Door detection error: {e}")
+            import traceback
+            traceback.print_exc()
+
+        # Wall plane detection: close wall/large vertical surface ahead.
+        try:
+            wall = self._detect_wall_plane(frame, w, h)
+            if wall is not None:
+                observations.append(wall)
+        except Exception as e:
+            print(f"[vision] Wall detection error: {e}")
             import traceback
             traceback.print_exc()
 
@@ -899,25 +945,25 @@ class VisionSystem:
     def _detect_door(self, frame: np.ndarray, w: int, h: int) -> Optional[SurfaceObservation]:
         """Detect a door interaction target.
 
-        The preferred signal is the handle itself. Door frames are useful
-        context, but they are less actionable than "handle at 2 o'clock; reach
-        right hand; press the lever down."
+        This is deliberately conservative. Handle-like lines are not enough on
+        their own; they must appear inside a door-frame context and persist for
+        several calls before a possible doorway surface is returned.
         """
         handle = self._detect_door_handle(frame, w, h)
         frame_context = self._detect_door_frame_context(frame, w, h)
+        wall_context = self._detect_wall_plane(frame, w, h)
+        candidate: Optional[SurfaceObservation] = None
 
-        if handle is not None:
+        if handle is not None and frame_context is not None:
             confidence = float(handle["confidence"])
-            if frame_context is not None:
-                confidence = min(0.94, confidence + 0.08)
+            confidence = min(0.86, confidence + 0.08)
 
             attrs = dict(handle)
-            attrs["has_frame"] = frame_context is not None
-            if frame_context is not None:
-                attrs["door_frame"] = frame_context
-            attrs["note"] = "door handle detected; verify push or pull gently"
+            attrs["has_frame"] = True
+            attrs["door_frame"] = frame_context
+            attrs["note"] = "possible doorway with handle-like feature; verify by touch"
 
-            return SurfaceObservation(
+            candidate = SurfaceObservation(
                 kind=SurfaceKind.DOOR,
                 confidence=confidence,
                 direction=self._direction_from_x_ratio(float(handle["handle_x_ratio"])),
@@ -927,23 +973,148 @@ class VisionSystem:
                 attributes=attrs,
             )
 
-        if frame_context is None:
+        elif handle is not None and wall_context is not None and wall_context.confidence >= 0.62:
+            confidence = min(0.78, float(handle["confidence"]) * 0.55 + wall_context.confidence * 0.45)
+            attrs = dict(handle)
+            attrs["has_frame"] = False
+            attrs["wall_context"] = wall_context.model_dump()
+            attrs["note"] = "wall-like surface with handle-like feature; possible door, verify by touch"
+
+            candidate = SurfaceObservation(
+                kind=SurfaceKind.DOOR,
+                confidence=confidence,
+                direction=self._direction_from_x_ratio(float(handle["handle_x_ratio"])),
+                near_field_ratio=max(float(handle.get("near_field_ratio", 0.0)), wall_context.near_field_ratio),
+                distance_m=min(float(handle["distance_m"]), wall_context.distance_m or float(handle["distance_m"])),
+                source="vision-wall-handle-candidate",
+                attributes=attrs,
+            )
+
+        elif frame_context is not None and float(frame_context["confidence"]) >= 0.72:
+            candidate = SurfaceObservation(
+                kind=SurfaceKind.DOOR,
+                confidence=float(frame_context["confidence"]),
+                direction=Direction.CENTER,
+                near_field_ratio=float(frame_context["near_field_ratio"]),
+                distance_m=float(frame_context["distance_m"]),
+                source="vision-door-frame",
+                attributes={
+                    **frame_context,
+                    "handle_detected": False,
+                    "handle_side": "unknown",
+                    "recommended_hand": "unknown",
+                    "handle_action": "confirm the doorway by touch before using it",
+                    "note": "possible door frame; verify by touch",
+                },
+            )
+
+        if candidate is None:
+            self._consec_door_hits = 0
+            self._door_candidate_key = None
+            return None
+
+        key = f"{candidate.source}:{candidate.direction.value}:{round(candidate.distance_m or 0.0, 1)}"
+        if getattr(self, "_door_candidate_key", None) != key:
+            self._door_candidate_key = key
+            self._consec_door_hits = 0
+        self._consec_door_hits = getattr(self, "_consec_door_hits", 0) + 1
+        if self._consec_door_hits < 3:
+            return None
+        return candidate
+
+    def _detect_wall_plane(self, frame: np.ndarray, w: int, h: int) -> Optional[SurfaceObservation]:
+        """Detect a close wall-like vertical plane in the walking path."""
+        if w <= 0 or h <= 0:
+            return None
+
+        y_start = int(h * 0.28)
+        y_end = int(h * 0.92)
+        x_start = int(w * 0.25)
+        x_end = int(w * 0.75)
+        if y_end - y_start < 80 or x_end - x_start < 80:
+            return None
+
+        crop = frame[y_start:y_end, x_start:x_end]
+        if crop.size == 0:
+            return None
+
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+        sat = hsv[:, :, 1].astype(np.float32)
+        val = hsv[:, :, 2].astype(np.float32)
+        low_sat_ratio = float(np.mean(sat < 65))
+        value_std = float(np.std(val))
+
+        edges = cv2.Canny(gray, 30, 90)
+        lines = cv2.HoughLinesP(
+            edges,
+            rho=1,
+            theta=np.pi / 180,
+            threshold=max(18, crop.shape[1] // 10),
+            minLineLength=max(32, crop.shape[0] // 5),
+            maxLineGap=14,
+        )
+        if lines is None:
+            return None
+
+        vertical_count = 0
+        horizontal_count = 0
+        vertical_xs = []
+        for line in lines[:, 0]:
+            lx1, ly1, lx2, ly2 = line
+            dx = abs(lx2 - lx1)
+            dy = abs(ly2 - ly1)
+            if dy >= max(24, dx * 3.0):
+                vertical_count += 1
+                vertical_xs.append((lx1 + lx2) / 2.0)
+            elif dx >= max(24, dy * 3.0):
+                horizontal_count += 1
+
+        if vertical_count < 2:
+            return None
+
+        x_spread = (max(vertical_xs) - min(vertical_xs)) / max(1.0, float(crop.shape[1])) if vertical_xs else 0.0
+        edge_density = float(np.mean(edges > 0))
+        wall_texture = low_sat_ratio >= 0.35 and value_std <= 65.0
+        vertical_dominance = vertical_count >= max(2, horizontal_count)
+        if not (wall_texture and vertical_dominance and x_spread >= 0.28 and edge_density >= 0.025):
+            return None
+
+        lower_half_edges = float(np.mean(edges[crop.shape[0] // 2 :, :] > 0))
+        if lower_half_edges >= 0.055:
+            distance_m = 0.8
+        elif lower_half_edges >= 0.035:
+            distance_m = 1.1
+        else:
+            distance_m = 1.5
+
+        confidence = min(
+            0.84,
+            0.38
+            + min(0.22, low_sat_ratio * 0.18)
+            + min(0.18, edge_density * 2.0)
+            + min(0.16, x_spread * 0.20)
+            + min(0.10, vertical_count * 0.015),
+        )
+        if confidence < 0.58:
             return None
 
         return SurfaceObservation(
-            kind=SurfaceKind.DOOR,
-            confidence=float(frame_context["confidence"]),
+            kind=SurfaceKind.WALL,
+            confidence=confidence,
             direction=Direction.CENTER,
-            near_field_ratio=float(frame_context["near_field_ratio"]),
-            distance_m=float(frame_context["distance_m"]),
-            source="vision-door-frame",
+            near_field_ratio=edge_density,
+            distance_m=distance_m,
+            source="vision-wall-plane",
             attributes={
-                **frame_context,
-                "handle_detected": False,
-                "handle_side": "unknown",
-                "recommended_hand": "unknown",
-                "handle_action": "find the handle by touch, then test push or pull gently",
-                "note": "door frame detected; handle not visible",
+                "low_saturation_ratio": round(low_sat_ratio, 3),
+                "value_std": round(value_std, 2),
+                "edge_density": round(edge_density, 3),
+                "lower_half_edge_density": round(lower_half_edges, 3),
+                "vertical_lines": vertical_count,
+                "horizontal_lines": horizontal_count,
+                "vertical_spread": round(float(x_spread), 3),
+                "note": "wall-like vertical plane ahead; verify with depth sensor for deployment",
             },
         )
 

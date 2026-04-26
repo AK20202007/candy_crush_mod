@@ -53,6 +53,7 @@ TARGET_KEYWORDS = {
 }
 
 SEVERITY_SCORE = {"info": 1, "low": 2, "medium": 3, "high": 4, "critical": 5}
+WALKING_STEP_M = 0.75
 
 
 def _distance_phrase(distance_m: Optional[float]) -> str:
@@ -64,6 +65,14 @@ def _distance_phrase(distance_m: Optional[float]) -> str:
         return "less than 3 feet away"
     feet = round(distance_m * 3.28084)
     return f"about {feet} feet away"
+
+
+def _walking_steps_phrase(distance_m: Optional[float]) -> str:
+    if distance_m is None:
+        return ""
+    steps = max(1, int(round(distance_m / WALKING_STEP_M)))
+    unit = "step" if steps == 1 else "steps"
+    return f"in about {steps} {unit}"
 
 
 def _direction_phrase(direction: Direction) -> str:
@@ -229,7 +238,7 @@ class WayfindingAgent(BaseAgent):
         if ctx.route.next_instruction:
             distance = ""
             if ctx.route.next_turn_distance_m is not None:
-                distance = f" in about {round(ctx.route.next_turn_distance_m * 3.28084)} feet"
+                distance = f" {_walking_steps_phrase(ctx.route.next_turn_distance_m)}"
             return AgentDecision(
                 action=AgentAction.GUIDE,
                 priority=60,

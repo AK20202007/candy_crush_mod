@@ -39,6 +39,7 @@ class SurfaceKind(str, Enum):
     CURB = "curb"
     CROSSWALK = "crosswalk"
     DOOR = "door"
+    WALL = "wall"
     OBSTACLE_EDGE = "obstacle_edge"
     UNKNOWN = "unknown"
 

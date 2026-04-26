@@ -100,7 +100,7 @@
         },
         "expect": {
           "action": "guide",
-          "priority": 60,
+          "priority": 70,
           "message_contains": ["Turn right"]
         }
       }

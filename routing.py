@@ -23,6 +23,7 @@ from urllib.parse import quote
 
 from navigation import RouteStep
 
+WALKING_STEP_M = 0.75
 ORS_GEOCODE = "https://api.openrouteservice.org/geocode/search"
 ORS_DIRECTIONS = "https://api.openrouteservice.org/v2/directions/foot-walking/json"
 GOOGLE_GEOCODE = "https://maps.googleapis.com/maps/api/geocode/json"
@@ -31,6 +32,25 @@ GOOGLE_DIRECTIONS = "https://maps.googleapis.com/maps/api/directions/json"
 
 def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text).strip()
+
+
+def _walking_steps_phrase(distance_m: Any) -> str:
+    try:
+        meters = float(distance_m)
+    except (TypeError, ValueError):
+        return ""
+    if meters <= 0:
+        return ""
+    steps = max(1, int(round(meters / WALKING_STEP_M)))
+    unit = "step" if steps == 1 else "steps"
+    return f"in about {steps} {unit}"
+
+
+def _append_step_distance(instruction: str, distance_m: Any) -> str:
+    step_phrase = _walking_steps_phrase(distance_m)
+    if not step_phrase:
+        return instruction
+    return f"{instruction.rstrip('. ')}. {step_phrase.capitalize()}."
 
 
 def geocode(api_key: str, query: str, timeout_s: float = 15.0) -> Tuple[float, float]:
@@ -94,7 +114,7 @@ def walking_directions(api_key: str, start_lon_lat: Tuple[float, float], end_lon
                 continue
             line = _strip_html(str(instr))
             if line:
-                lines.append(line)
+                lines.append(_append_step_distance(line, step.get("distance")))
     if not lines:
         raise RuntimeError("Route had no step instructions to speak.")
     return lines
@@ -195,7 +215,8 @@ def google_walking_directions(
     for step in legs[0].get("steps") or []:
         instr = _strip_html(str(step.get("html_instructions") or "")).strip()
         if instr:
-            lines.append(instr)
+            distance = (step.get("distance") or {}).get("value")
+            lines.append(_append_step_distance(instr, distance))
     if len(lines) == 1:
         raise RuntimeError("Google directions route had no step instructions to speak.")
     return lines

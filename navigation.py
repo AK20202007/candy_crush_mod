@@ -17,8 +17,8 @@ from typing import Callable, List, Optional, Tuple
 # Generic steps we cycle through to simulate ongoing guidance.
 _DEFAULT_STEPS = [
     "Walk straight",
-    "Continue for about ten meters",
-    "Turn left in ten meters",
+    "Continue for about thirteen steps",
+    "Turn left in about thirteen steps",
     "Walk straight",
     "Turn right at the next opening",
     "You are approaching your destination area",

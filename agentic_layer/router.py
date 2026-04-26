@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from .agents import CrossingSignalAgent, ExitSeekingAgent, FallbackAgent, IndoorNavigationAgent, OrientationAgent, SafetyAgent, SidewalkAgent, TargetFindingAgent, TrafficAgent, WayfindingAgent
+from .agents import CrossingSignalAgent, EnvironmentMappingAgent, ExitSeekingAgent, FallbackAgent, IndoorNavigationAgent, OrientationAgent, SafetyAgent, SidewalkAgent, TargetFindingAgent, TrafficAgent, WayfindingAgent
 from .models import AgentAction, AgentDecision, FrameContext
 from .policy import SafetyPolicy
 
@@ -30,6 +30,8 @@ class AgenticNavigationRouter:
             SidewalkAgent(self.policy),
             CrossingSignalAgent(self.policy),
             TargetFindingAgent(self.policy),
+            EnvironmentMappingAgent(self.policy),
+            ExitSeekingAgent(self.policy),
             WayfindingAgent(self.policy),
             IndoorNavigationAgent(self.policy),
             OrientationAgent(self.policy),

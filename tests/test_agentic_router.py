@@ -580,10 +580,11 @@ def test_partial_edge_hazard_warns_when_object_is_cut_off_by_camera() -> None:
     assert decision.debug["reason"] == "partial-edge object-distance hazard"
 
 
-def test_door_handle_guidance_instructs_hand_and_action() -> None:
+def test_clear_door_handle_is_announced_with_touch_verification() -> None:
     router = AgenticNavigationRouter()
     ctx = _ctx(
-        motion=MotionState(is_moving=True, speed_mps=0.3),
+        route=RouteState(active=True, destination="library", exit_seeking=True),
+        motion=MotionState(is_moving=False, speed_mps=0.0),
         surfaces=[
             SurfaceObservation(
                 kind=SurfaceKind.DOOR,
@@ -606,12 +607,92 @@ def test_door_handle_guidance_instructs_hand_and_action() -> None:
     decision = router.decide(ctx)
 
     assert decision.action == AgentAction.GUIDE
-    assert decision.priority == 76
-    assert decision.haptic == HapticPattern.RIGHT
-    assert "Door handle on the right" in decision.message
-    assert "Use your right" in decision.message
-    assert "press the lever down" in decision.message
-    assert decision.debug["reason"] == "door-handle-guidance"
+    assert decision.priority == 77
+    assert "Door handle detected right" in decision.message
+    assert "your right hand" in decision.message
+    assert "Confirm by touch before opening" in decision.message
+
+
+def test_wall_surface_warns_as_obstacle() -> None:
+    router = AgenticNavigationRouter()
+    ctx = _ctx(
+        motion=MotionState(is_moving=True, speed_mps=0.4),
+        surfaces=[
+            SurfaceObservation(
+                kind=SurfaceKind.WALL,
+                confidence=0.72,
+                direction=Direction.CENTER,
+                distance_m=0.9,
+                source="vision-wall-plane",
+                attributes={},
+            )
+        ],
+    )
+
+    decision = router.decide(ctx)
+
+    assert decision.action == AgentAction.WARN
+    assert decision.priority == 85
+    assert "wall ahead" in decision.message
+    assert decision.debug["reason"] == "wall-plane-obstacle"
+
+
+def test_stationary_wall_surface_is_spoken_as_orientation() -> None:
+    router = AgenticNavigationRouter()
+    ctx = _ctx(
+        motion=MotionState(is_moving=False, speed_mps=0.0),
+        surfaces=[
+            SurfaceObservation(
+                kind=SurfaceKind.WALL,
+                confidence=0.70,
+                direction=Direction.CENTER,
+                distance_m=1.4,
+                source="vision-wall-plane",
+                attributes={},
+            )
+        ],
+    )
+
+    decision = router.decide(ctx)
+
+    assert decision.action == AgentAction.ORIENT
+    assert "Wall detected ahead" in decision.message
+    assert "scan left or right" in decision.message
+
+
+def test_route_guidance_uses_walking_steps_not_feet() -> None:
+    router = AgenticNavigationRouter()
+    ctx = _ctx(
+        route=RouteState(
+            active=True,
+            destination="library",
+            next_instruction="Turn left at the hallway",
+            next_turn_distance_m=7.5,
+        ),
+        motion=MotionState(is_moving=True, speed_mps=0.8),
+        scene=SceneState(location_type="sidewalk", visual_confidence=0.9),
+    )
+
+    decision = router.decide(ctx)
+
+    assert decision.action == AgentAction.GUIDE
+    assert "in about 10 steps" in decision.message
+    assert "feet" not in decision.message
+
+
+def test_indoor_exit_guidance_tells_user_to_scan_for_door() -> None:
+    router = AgenticNavigationRouter()
+    ctx = _ctx(
+        route=RouteState(active=True, destination="library", exit_seeking=True),
+        motion=MotionState(is_moving=False, speed_mps=0.0),
+        scene=SceneState(location_type="room", visual_confidence=0.9),
+    )
+
+    decision = router.decide(ctx)
+
+    assert decision.action == AgentAction.ASK
+    assert "360 degrees" in decision.message
+    assert "door or exit sign" in decision.message
 
 
 def main() -> None:
@@ -633,7 +714,11 @@ def main() -> None:
     test_low_confidence_fallback_asks_user_to_slow_down()
     test_universal_proximity_warning_stops_for_any_close_object()
     test_partial_edge_hazard_warns_when_object_is_cut_off_by_camera()
-    test_door_handle_guidance_instructs_hand_and_action()
+    test_clear_door_handle_is_announced_with_touch_verification()
+    test_wall_surface_warns_as_obstacle()
+    test_stationary_wall_surface_is_spoken_as_orientation()
+    test_route_guidance_uses_walking_steps_not_feet()
+    test_indoor_exit_guidance_tells_user_to_scan_for_door()
     test_far_person_and_stop_sign_stop_sign_wins()
     test_far_person_and_stop_sign_with_target_query_stop_sign_still_wins()
     print("agentic router tests passed")

@@ -85,7 +85,7 @@ def test_detection_from_bbox_marks_frame_edge_partial() -> None:
     assert "bottom" in det.attributes["edge_contact"]
 
 
-def test_door_handle_detector_finds_horizontal_lever() -> None:
+def test_door_handle_like_pattern_is_not_confirmed_doorway() -> None:
     frame = np.full((480, 640, 3), (150, 150, 145), dtype=np.uint8)
     cv2.line(frame, (250, 80), (250, 450), (70, 70, 70), 3)
     cv2.line(frame, (520, 80), (520, 450), (70, 70, 70), 3)
@@ -97,18 +97,30 @@ def test_door_handle_detector_finds_horizontal_lever() -> None:
     vision._cfg = VisionConfig(camera_mount="hand")
     vision._consec_door_hits = 0
 
-    # Consecutive-frame gate requires 3 detections before reporting.
-    for _ in range(2):
-        vision._detect_door(frame, 640, 480)
-    obs = vision._detect_door(frame, 640, 480)
+    # Handle-like lines are too easy to hallucinate, so they must not become a
+    # confirmed door surface unless the conservative doorway checks also pass.
+    for _ in range(3):
+        obs = vision._detect_door(frame, 640, 480)
+
+    assert obs is None
+
+
+def test_wall_plane_detector_finds_wall_like_obstacle() -> None:
+    frame = np.full((480, 640, 3), (145, 145, 142), dtype=np.uint8)
+    for x in [190, 260, 330, 405]:
+        cv2.line(frame, (x, 130), (x, 430), (70, 70, 70), 4)
+    cv2.line(frame, (170, 410), (470, 410), (85, 85, 85), 3)
+
+    vision = object.__new__(VisionSystem)
+    vision._cfg = VisionConfig(camera_mount="hand")
+
+    obs = vision._detect_wall_plane(frame, 640, 480)
 
     assert obs is not None
-    assert obs.kind == SurfaceKind.DOOR
-    assert obs.source == "vision-door-handle"
-    assert obs.attributes["handle_detected"] is True
-    assert obs.attributes["handle_orientation"] == "lever_horizontal"
-    assert obs.attributes["recommended_hand"] == "right"
-    assert obs.attributes["handle_bbox"][0] < obs.attributes["handle_bbox"][2]
+    assert obs.kind == SurfaceKind.WALL
+    assert obs.source == "vision-wall-plane"
+    assert obs.confidence >= 0.58
+    assert obs.attributes["vertical_lines"] >= 2
 
 
 def main() -> None:
@@ -117,7 +129,8 @@ def main() -> None:
     test_surface_crop_identifies_bright_gray_as_sidewalk()
     test_surface_crop_identifies_dark_gray_as_road()
     test_detection_from_bbox_marks_frame_edge_partial()
-    test_door_handle_detector_finds_horizontal_lever()
+    test_door_handle_like_pattern_is_not_confirmed_doorway()
+    test_wall_plane_detector_finds_wall_like_obstacle()
     print("vision signal state tests passed")
 
 

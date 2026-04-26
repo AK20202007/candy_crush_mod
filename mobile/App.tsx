@@ -23,6 +23,7 @@ const ARRIVAL_RADIUS_M = 14;
 const CONFIRM_HITS_NEEDED = 2;
 const ROUTE_REPEAT_MS = 25_000;
 const WARNING_PAUSE_MS = 4_500;
+const WALKING_STEP_M = 0.75;
 
 type Phase = "idle" | "locating" | "routing" | "navigating" | "arrived" | "error";
 type VisionState = "unavailable" | "off" | "starting" | "on" | "error";
@@ -39,11 +40,12 @@ function toLatLng(location: Location.LocationObject): LatLng {
   };
 }
 
-function feet(meters: number | null): string {
+function walkingSteps(meters: number | null): string {
   if (meters == null || !Number.isFinite(meters)) {
     return "--";
   }
-  return `${Math.max(0, Math.round(meters * 3.28084))} ft`;
+  const steps = Math.max(1, Math.round(meters / WALKING_STEP_M));
+  return `${steps} ${steps === 1 ? "step" : "steps"}`;
 }
 
 function formatTime(): string {
@@ -178,7 +180,7 @@ export default function App(): React.JSX.Element {
         const instruction = steps[index]?.instruction;
         if (instruction) {
           lastRouteSpeakAtRef.current = now;
-          void speak(`${instruction}. In about ${feet(result.distanceToTargetM)}.`);
+          void speak(`${instruction}. In about ${walkingSteps(result.distanceToTargetM)}.`);
         }
       }
     },
@@ -373,7 +375,7 @@ export default function App(): React.JSX.Element {
           <Text style={styles.currentInstruction}>
             {currentStep?.instruction ?? (phase === "arrived" ? "Destination area reached." : "Set a destination and start navigation.")}
           </Text>
-          <Text style={styles.distanceText}>Next target: {feet(distanceToTargetM)}</Text>
+          <Text style={styles.distanceText}>Next target: {walkingSteps(distanceToTargetM)}</Text>
         </View>
 
         {lastWarning ? (

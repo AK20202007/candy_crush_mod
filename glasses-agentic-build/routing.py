@@ -8,6 +8,7 @@ import requests
 
 
 ORS_BASE = "https://api.openrouteservice.org"
+WALKING_STEP_M = 0.75
 
 
 def build_maps_route(api_key: str, start: tuple[float, float], destination: str) -> list[str]:
@@ -69,8 +70,9 @@ def _walking_steps(api_key: str, start: tuple[float, float], end: tuple[float, f
             if not instruction:
                 continue
             if isinstance(distance_m, (int, float)) and distance_m > 0:
-                feet = round(float(distance_m) * 3.28084)
-                steps.append(f"{instruction} for about {feet} feet")
+                step_count = max(1, int(round(float(distance_m) / WALKING_STEP_M)))
+                unit = "step" if step_count == 1 else "steps"
+                steps.append(f"{instruction} for about {step_count} {unit}")
             else:
                 steps.append(instruction)
     return steps
