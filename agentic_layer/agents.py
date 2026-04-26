@@ -30,6 +30,19 @@ HAZARD_LABELS = {
     "door",
 }
 
+INDOOR_SCAN_CONTEXT_LABELS = {
+    "person",
+    "chair",
+    "bench",
+    "dining table",
+    "table",
+    "couch",
+    "door",
+    "stairs",
+    "stair",
+    "staircase",
+}
+
 STOP_HAZARDS = {
     "stairs",
     "stair",
@@ -1033,6 +1046,54 @@ def _wall_observation_message(surface: SurfaceObservation) -> str:
     return f"Wall detected to the {direction}, {distance}. Keep it to your {direction} and continue scanning for an opening or door handle."
 
 
+def _indoor_scan_context_message(ctx: FrameContext) -> Optional[str]:
+    phrases: List[str] = []
+    wall = _best_wall_surface(ctx)
+    if wall is not None:
+        phrases.append(f"wall {_direction_phrase(wall.direction)}, {_distance_phrase(wall.distance_m)}")
+
+    detections = [
+        det for det in ctx.detections
+        if (
+            det.label.lower() in INDOOR_SCAN_CONTEXT_LABELS
+            and det.label.lower() != "door"
+            and det.confidence >= 0.50
+            and (det.distance_m is None or det.distance_m <= 6.0)
+        )
+    ]
+    detections = sorted(
+        detections,
+        key=lambda det: (
+            det.distance_m is None,
+            det.distance_m if det.distance_m is not None else 99.0,
+            -det.confidence,
+        ),
+    )
+    for det in detections[:3]:
+        phrases.append(f"{det.label} {_direction_phrase(det.direction)}, {_distance_phrase(det.distance_m)}")
+
+    if not phrases:
+        return None
+    return (
+        "I see " + "; ".join(phrases[:4]) + ". "
+        "Keep scanning slowly for a door handle or exit sign before moving."
+    )
+
+
+def _indoor_scan_context_haptic(ctx: FrameContext) -> HapticPattern:
+    wall = _best_wall_surface(ctx)
+    if wall is not None:
+        return _haptic_for_direction(wall.direction)
+    detections = [
+        det for det in ctx.detections
+        if det.label.lower() in INDOOR_SCAN_CONTEXT_LABELS and det.confidence >= 0.50
+    ]
+    if not detections:
+        return HapticPattern.CAUTION
+    nearest = sorted(detections, key=lambda d: d.distance_m if d.distance_m is not None else 99.0)[0]
+    return _haptic_for_direction(nearest.direction)
+
+
 class EnvironmentMappingAgent(BaseAgent):
     """Handles the initial 360-degree environment mapping to determine indoor vs. outdoor."""
 
@@ -1232,15 +1293,19 @@ class ExitSeekingAgent(BaseAgent):
                 debug={"surface": possible_door.model_dump(), "reason": "wall-handle-possible-exit"},
             )
 
-        wall = _best_wall_surface(ctx)
-        if wall is not None:
+        context_message = _indoor_scan_context_message(ctx)
+        if context_message is not None and not ctx.motion.is_moving:
             return AgentDecision(
-                action=AgentAction.ASK if not ctx.motion.is_moving else AgentAction.GUIDE,
-                priority=59 if not ctx.motion.is_moving else 56,
-                message=_wall_observation_message(wall),
-                haptic=HapticPattern.CAUTION,
-                agents_consulted=[self.name, "wall_plane"],
-                debug={"surface": wall.model_dump(), "reason": "exit-wall-visible"},
+                action=AgentAction.ORIENT,
+                priority=74,
+                message=context_message,
+                haptic=_indoor_scan_context_haptic(ctx),
+                agents_consulted=[self.name, "indoor_scan_context"],
+                debug={
+                    "detections": [d.model_dump() for d in ctx.detections],
+                    "surfaces": [s.model_dump() for s in ctx.surfaces],
+                    "reason": "exit-scan-context-visible",
+                },
             )
 
         # No door visible. Do not block live route directions every frame; the

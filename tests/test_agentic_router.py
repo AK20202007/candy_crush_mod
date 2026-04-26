@@ -826,6 +826,39 @@ def test_indoor_exit_guidance_tells_user_to_scan_for_door() -> None:
     assert "door or exit sign" in decision.message
 
 
+def test_indoor_exit_scan_mentions_visible_wall_and_furniture() -> None:
+    router = AgenticNavigationRouter()
+    ctx = _ctx(
+        route=RouteState(active=True, destination="library", exit_seeking=True),
+        motion=MotionState(is_moving=False, speed_mps=0.0),
+        scene=SceneState(location_type="room", visual_confidence=0.9),
+        detections=[
+            Detection(label="chair", confidence=0.88, distance_m=1.4, direction=Direction.SLIGHT_LEFT),
+            Detection(label="couch", confidence=0.83, distance_m=2.2, direction=Direction.RIGHT),
+        ],
+        surfaces=[
+            SurfaceObservation(
+                kind=SurfaceKind.WALL,
+                confidence=0.70,
+                direction=Direction.CENTER,
+                distance_m=1.0,
+                source="vision-wall-plane",
+                attributes={},
+            )
+        ],
+    )
+
+    decision = router.decide(ctx)
+
+    assert decision.action == AgentAction.ORIENT
+    assert decision.priority == 74
+    assert "wall ahead" in decision.message
+    assert "chair left" in decision.message
+    assert "couch right" in decision.message
+    assert "door handle or exit sign" in decision.message
+    assert decision.debug["reason"] == "exit-scan-context-visible"
+
+
 def main() -> None:
     test_safety_warning_takes_priority_over_route_guidance()
     test_anti_spam_suppresses_repeated_non_safety_message()
@@ -853,6 +886,7 @@ def main() -> None:
     test_route_guidance_uses_walking_steps_not_feet()
     test_indoor_route_guidance_includes_pending_outdoor_step()
     test_indoor_exit_guidance_tells_user_to_scan_for_door()
+    test_indoor_exit_scan_mentions_visible_wall_and_furniture()
     test_far_person_and_stop_sign_stop_sign_wins()
     test_far_person_and_stop_sign_with_target_query_stop_sign_still_wins()
     print("agentic router tests passed")
