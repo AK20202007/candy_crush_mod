@@ -13,6 +13,23 @@ from agentic_layer.utils import detection_from_bbox  # noqa: E402
 from vision import VisionConfig, VisionSystem  # noqa: E402
 
 
+class _FakeDoorPartsResults:
+    def __init__(self, rows):
+        self.xyxy = [np.asarray(rows, dtype=np.float32)]
+
+
+class _FakeDoorPartsModel:
+    names = {0: "door_flap", 1: "handle", 2: "hinge"}
+
+    def __call__(self, frame, size=416):
+        return _FakeDoorPartsResults(
+            [
+                [414, 252, 462, 296, 0.63, 1],
+                [150, 60, 510, 430, 0.72, 0],
+            ]
+        )
+
+
 def _traffic_light_detection() -> Detection:
     return Detection(
         label="traffic light",
@@ -149,6 +166,25 @@ def test_round_door_knob_with_frame_is_confirmed() -> None:
     assert "turn the knob" in obs.attributes["handle_action"]
 
 
+def test_optional_door_parts_model_promotes_handle_surface() -> None:
+    frame = np.full((480, 640, 3), (150, 150, 145), dtype=np.uint8)
+
+    vision = object.__new__(VisionSystem)
+    vision._cfg = VisionConfig(camera_mount="hand", door_parts_conf=0.40)
+    vision._door_parts_model = _FakeDoorPartsModel()
+
+    observations = vision._detect_door_parts(frame, 640, 480)
+
+    assert len(observations) == 1
+    obs = observations[0]
+    assert obs.kind == SurfaceKind.DOOR
+    assert obs.source == "joechencc-door-parts-handle"
+    assert obs.attributes["model_source"] == "Joechencc/Door_detection"
+    assert obs.attributes["clear_handle"] is True
+    assert obs.attributes["has_frame"] is True
+    assert obs.attributes["handle_orientation"] == "model_handle"
+
+
 def main() -> None:
     test_green_traffic_light_crop_is_categorized()
     test_red_traffic_light_crop_is_categorized()
@@ -158,6 +194,7 @@ def main() -> None:
     test_door_handle_like_pattern_is_not_confirmed_doorway()
     test_wall_plane_detector_finds_wall_like_obstacle()
     test_round_door_knob_with_frame_is_confirmed()
+    test_optional_door_parts_model_promotes_handle_surface()
     print("vision signal state tests passed")
 
 

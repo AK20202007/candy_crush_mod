@@ -940,12 +940,17 @@ def _best_clear_door_handle_surface(ctx: FrameContext) -> Optional[SurfaceObserv
             s.kind == SurfaceKind.DOOR
             and bool(s.attributes.get("handle_detected"))
             and bool(s.attributes.get("clear_handle", True))
-            and s.source in {"vision-door-handle", "vision-wall-handle-candidate"}
+            and s.source in {"vision-door-handle", "vision-wall-handle-candidate", "joechencc-door-parts-handle"}
             and (
                 (
                     s.source == "vision-door-handle"
                     and s.confidence >= 0.80
                     and float(s.attributes.get("handle_confidence", s.confidence) or 0.0) >= 0.74
+                )
+                or (
+                    s.source == "joechencc-door-parts-handle"
+                    and s.confidence >= 0.50
+                    and float(s.attributes.get("handle_confidence", s.confidence) or 0.0) >= 0.45
                 )
                 or (
                     s.source == "vision-wall-handle-candidate"

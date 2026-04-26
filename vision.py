@@ -10,9 +10,12 @@ instead of immediately speaking from inside the vision loop.
 """
 from __future__ import annotations
 
+import os
+import sys
 import time
 from collections import deque
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
 import cv2
@@ -123,11 +126,44 @@ def _signal_state_from_label(label: str) -> str:
     return "unknown"
 
 
+def _model_label(names: object, cls_id: int) -> str:
+    if isinstance(names, dict):
+        return str(names.get(cls_id, names.get(str(cls_id), cls_id))).lower().strip()
+    if isinstance(names, (list, tuple)) and 0 <= cls_id < len(names):
+        return str(names[cls_id]).lower().strip()
+    return str(cls_id)
+
+
+def _has_nearby_door_part_context(handle_row: np.ndarray, context_rows: List[np.ndarray]) -> bool:
+    if not context_rows:
+        return False
+    hx1, hy1, hx2, hy2 = [float(v) for v in handle_row[:4]]
+    hcx = (hx1 + hx2) / 2.0
+    hcy = (hy1 + hy2) / 2.0
+    handle_w = max(1.0, hx2 - hx1)
+    handle_h = max(1.0, hy2 - hy1)
+    for row in context_rows:
+        x1, y1, x2, y2 = [float(v) for v in row[:4]]
+        cx = (x1 + x2) / 2.0
+        cy = (y1 + y2) / 2.0
+        part_w = max(1.0, x2 - x1)
+        part_h = max(1.0, y2 - y1)
+        if x1 <= hcx <= x2 and y1 <= hcy <= y2:
+            return True
+        if abs(cx - hcx) <= max(handle_w * 5.0, part_w * 0.65) and abs(cy - hcy) <= max(handle_h * 6.0, part_h * 0.65):
+            return True
+    return False
+
+
 @dataclass
 class VisionConfig:
     """Tunable thresholds for warnings and YOLO inference."""
 
     model_path: str = "yolov8n.pt"
+    door_parts_model_path: Optional[str] = None
+    door_parts_yolov5_dir: Optional[str] = None
+    door_parts_conf: float = 0.40
+    door_parts_imgsz: int = 416
     obstacle_area_ratio: float = 0.12
     person_center_radius: float = 0.18
     warning_cooldown_s: float = 2.5
@@ -339,6 +375,7 @@ class VisionSystem:
 
         self._model = YOLO(self._cfg.model_path)
         self._name_to_id: Dict[str, int] = {name.lower(): idx for idx, name in self._model.names.items()}
+        self._door_parts_model = self._load_door_parts_model()
 
         self._active_classes = {name for name in CORE_CLASSES if name in self._name_to_id}
         for name in OPTIONAL_CLASSES:
@@ -371,9 +408,77 @@ class VisionSystem:
             f"confirm_frames={self._cfg.confirm_frames} target_fps={self._cfg.target_fps} "
             f"preview={self._cfg.show_preview}"
         )
+        if self._door_parts_model is not None:
+            names = getattr(self._door_parts_model, "names", {})
+            model_path = getattr(self, "_door_parts_model_path", self._cfg.door_parts_model_path)
+            print(f"[vision] Door-parts model active: {model_path} names={names}")
 
     def active_class_labels(self) -> Set[str]:
         return set(self._active_classes)
+
+    def _load_door_parts_model(self):
+        """Optionally load a local YOLOv5 door-parts model.
+
+        Joechencc/Door_detection provides YOLOv5 weights with an explicit
+        "handle" class. Those weights are not YOLOv8-forward-compatible, so we
+        only load them through a user-provided local YOLOv5 checkout.
+        """
+        raw_model_path = (self._cfg.door_parts_model_path or os.environ.get("DOOR_PARTS_MODEL_PATH") or "").strip()
+        if not raw_model_path:
+            return None
+
+        model_path = Path(raw_model_path).expanduser()
+        if not model_path.exists():
+            print(f"[vision] Door-parts model not found: {model_path}")
+            return None
+
+        raw_yolov5_dir = (self._cfg.door_parts_yolov5_dir or os.environ.get("DOOR_PARTS_YOLOV5_DIR") or "").strip()
+        if not raw_yolov5_dir:
+            print("[vision] DOOR_PARTS_YOLOV5_DIR is required for YOLOv5 door-parts weights.")
+            return None
+
+        yolov5_dir = Path(raw_yolov5_dir).expanduser()
+        if not (yolov5_dir / "hubconf.py").exists():
+            print(f"[vision] YOLOv5 hubconf.py not found in: {yolov5_dir}")
+            return None
+
+        try:
+            if str(yolov5_dir) not in sys.path:
+                sys.path.insert(0, str(yolov5_dir))
+            original_torch_load = torch.load
+
+            def _trusted_checkpoint_load(*args, **kwargs):
+                kwargs.setdefault("weights_only", False)
+                try:
+                    return original_torch_load(*args, **kwargs)
+                except TypeError as exc:
+                    if "weights_only" not in str(exc):
+                        raise
+                    kwargs.pop("weights_only", None)
+                    return original_torch_load(*args, **kwargs)
+
+            # YOLOv5 checkpoints are pickle-based. Reaching this code already
+            # requires an explicit local YOLOv5 checkout and local weights path.
+            torch.load = _trusted_checkpoint_load
+            try:
+                model = torch.hub.load(
+                    str(yolov5_dir),
+                    "custom",
+                    path_or_model=str(model_path),
+                    source="local",
+                    autoshape=True,
+                    verbose=False,
+                )
+            finally:
+                torch.load = original_torch_load
+            model.conf = float(self._cfg.door_parts_conf)
+            model.iou = float(self._cfg.iou)
+            model.max_det = int(self._cfg.max_det)
+            self._door_parts_model_path = str(model_path)
+            return model
+        except Exception as exc:
+            print(f"[vision] Door-parts model disabled: {exc}")
+            return None
 
     def run_forever(self, camera_index: int = 0, stop_event: Optional[threading.Event] = None) -> None:
         cap = cv2.VideoCapture(camera_index, cv2.CAP_AVFOUNDATION)
@@ -740,6 +845,14 @@ class VisionSystem:
             import traceback
             traceback.print_exc()
 
+        # Optional trained door-parts detector with an explicit handle class.
+        try:
+            observations.extend(self._detect_door_parts(frame, w, h))
+        except Exception as e:
+            print(f"[vision] Door-parts detection error: {e}")
+            import traceback
+            traceback.print_exc()
+
         # Door detection using vertical edge patterns
         try:
             door = self._detect_door(frame, w, h)
@@ -1024,6 +1137,80 @@ class VisionSystem:
         if self._consec_door_hits < required_hits:
             return None
         return candidate
+
+    def _detect_door_parts(self, frame: np.ndarray, w: int, h: int) -> List[SurfaceObservation]:
+        if self._door_parts_model is None:
+            return []
+
+        model_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self._door_parts_model(model_frame, size=int(self._cfg.door_parts_imgsz))
+        if not hasattr(results, "xyxy") or not results.xyxy:
+            return []
+
+        raw_rows = results.xyxy[0]
+        if hasattr(raw_rows, "detach"):
+            rows = raw_rows.detach().cpu().numpy()
+        else:
+            rows = np.asarray(raw_rows)
+        if rows.size == 0:
+            return []
+
+        names = getattr(self._door_parts_model, "names", {})
+        context_rows = []
+        handle_rows = []
+        for row in rows:
+            if len(row) < 6:
+                continue
+            cls_id = int(row[5])
+            label = _model_label(names, cls_id)
+            confidence = float(row[4])
+            if confidence < float(self._cfg.door_parts_conf):
+                continue
+            if label != "handle":
+                if label.startswith("door") or label.startswith("frame") or label == "hinge":
+                    context_rows.append(row)
+                continue
+            handle_rows.append(row)
+
+        observations: List[SurfaceObservation] = []
+        for row in handle_rows:
+            confidence = float(row[4])
+            x1, y1, x2, y2 = [int(round(float(v))) for v in row[:4]]
+            x1 = max(0, min(w - 1, x1))
+            x2 = max(x1 + 1, min(w, x2))
+            y1 = max(0, min(h - 1, y1))
+            y2 = max(y1 + 1, min(h, y2))
+            cx = (x1 + x2) / 2.0
+            cy = (y1 + y2) / 2.0
+            has_context = _has_nearby_door_part_context(row, context_rows)
+            handle = self._door_handle_attributes(
+                confidence=confidence,
+                bbox=(x1, y1, x2, y2),
+                center=(cx, cy),
+                frame_width=w,
+                frame_height=h,
+                orientation="model_handle",
+                support_side="model",
+                near_field_ratio=min(1.0, max((x2 - x1) / max(1.0, w * 0.12), (y2 - y1) / max(1.0, h * 0.14))),
+            )
+            handle["clear_handle"] = confidence >= max(0.50, float(self._cfg.door_parts_conf)) and (has_context or confidence >= 0.75)
+            handle["has_frame"] = has_context
+            handle["model_label"] = "handle"
+            handle["model_source"] = "Joechencc/Door_detection"
+
+            observations.append(
+                SurfaceObservation(
+                    kind=SurfaceKind.DOOR,
+                    confidence=min(0.96, confidence + (0.08 if has_context else 0.03)),
+                    direction=self._direction_from_x_ratio(float(handle["handle_x_ratio"])),
+                    near_field_ratio=float(handle.get("near_field_ratio", 0.0)),
+                    distance_m=float(handle["distance_m"]),
+                    source="joechencc-door-parts-handle",
+                    attributes=handle,
+                )
+            )
+
+        return observations
 
     def _detect_wall_plane(self, frame: np.ndarray, w: int, h: int) -> Optional[SurfaceObservation]:
         """Detect a close wall-like vertical plane in the walking path."""
@@ -1521,6 +1708,8 @@ class VisionSystem:
             handle_action = "press the lever down, then gently test whether the door pushes or pulls"
         elif orientation == "round_knob":
             handle_action = "turn the knob, then gently test whether the door pushes or pulls"
+        elif orientation == "model_handle":
+            handle_action = "locate the handle by touch, then gently test whether the door pushes or pulls"
         else:
             handle_action = "feel along the handle plate for the lever or pull, then gently test whether the door pushes or pulls"
 

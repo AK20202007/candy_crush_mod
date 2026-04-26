@@ -164,6 +164,9 @@ class NavigationApp:
                 target_fps=args.target_fps,
                 show_preview=args.preview,
                 surface_every_n_frames=args.surface_every_n,
+                door_parts_model_path=args.door_parts_model,
+                door_parts_yolov5_dir=args.door_parts_yolov5_dir,
+                door_parts_conf=args.door_parts_conf,
             )
             
             def handle_frame_decision(ctx, decision):
@@ -760,6 +763,24 @@ Examples:
         default="hand",
         choices=["head", "hand"],
         help="Camera mount position: 'head' for glasses/head-mounted, 'hand' for phone (default: hand)."
+    )
+    vision_group.add_argument(
+        "--door-parts-model",
+        type=str,
+        default=os.environ.get("DOOR_PARTS_MODEL_PATH"),
+        help="Optional YOLOv5 door-parts .pt model with a 'handle' class, such as Joechencc/Door_detection yolov5/best.pt.",
+    )
+    vision_group.add_argument(
+        "--door-parts-yolov5-dir",
+        type=str,
+        default=os.environ.get("DOOR_PARTS_YOLOV5_DIR"),
+        help="Local YOLOv5 checkout directory required for --door-parts-model weights.",
+    )
+    vision_group.add_argument(
+        "--door-parts-conf",
+        type=float,
+        default=float(os.environ.get("DOOR_PARTS_CONF", "0.40")),
+        help="Confidence threshold for the optional YOLOv5 door-parts model.",
     )
 
     # Address-to-address navigation
