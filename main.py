@@ -153,16 +153,9 @@ class NavigationApp:
                 camera_mount=args.camera_mount
             )
             
-            def handle_decision(decision):
+            def handle_decision(ctx, decision):
                 """Callback for vision system decisions."""
                 if self.interface and not self.stop_event.is_set():
-                    # Create a minimal frame context
-                    from agentic_layer.models import FrameContext, SceneState
-                    ctx = FrameContext(
-                        timestamp_ms=int(time.time() * 1000),
-                        frame_id=str(time.time()),
-                        scene=SceneState(location_type="sidewalk")
-                    )
                     self.interface.process_decision(decision, ctx)
             
             self.vision = VisionSystem(
