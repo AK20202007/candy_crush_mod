@@ -399,13 +399,55 @@ class NavigationApp:
                 print(f"[system]   Address : {destination_address}")
                 print(f"[system]   Coords  : lat={destination_lat}, lng={destination_lng}")
 
-                self.interface.set_destination(destination_name)
-
-                # Initialize route state and trigger vision mapping
-                self.route_state.active = True
-                self.route_state.destination = destination_name
-                self.route_state.mapping_state = "pending"
-                self.route_state.next_instruction = f"Head toward {destination_name}."
+                # Plan the route using the professional NavigationPlanner
+                try:
+                    from address_navigation import NavigationPlanner, LegType
+                    from gps_location import GPSCoords
+                    
+                    ors_key = (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip() or None
+                    indoor_layout = os.environ.get("INDOOR_LAYOUT_JSON")
+                    planner = NavigationPlanner(
+                        ors_key=ors_key,
+                        indoor_graph_path=indoor_layout,
+                    )
+                    
+                    # Prepare origin and destination data
+                    origin_gps = None
+                    if current_lat and current_lng:
+                        origin_gps = GPSCoords(latitude=current_lat, longitude=current_lng)
+                    
+                    dest_gps = None
+                    if destination_lat and destination_lng:
+                        dest_gps = GPSCoords(latitude=destination_lat, longitude=destination_lng)
+                    
+                    # Generate the plan
+                    plan = planner.plan("Your current location", destination_name, origin_gps=origin_gps, dest_gps=dest_gps)
+                    
+                    # Initialize route state
+                    self.route_state.active = True
+                    self.route_state.destination = destination_name
+                    
+                    # If we have specific steps, use the first one
+                    all_steps = plan.all_steps()
+                    if all_steps:
+                        self.route_state.next_instruction = all_steps[0]
+                    else:
+                        self.route_state.next_instruction = f"Head toward {destination_name}."
+                    
+                    # Trigger 360-degree mapping if starting indoors
+                    if plan.origin_is_indoor:
+                        self.route_state.mapping_state = "pending"
+                        print("[system] Starting indoors. Mapping required.")
+                    else:
+                        self.route_state.mapping_state = "done"
+                        
+                except Exception as e:
+                    print(f"[system] Routing plan failed: {e}")
+                    # Fallback to simple navigation
+                    self.route_state.active = True
+                    self.route_state.destination = destination_name
+                    self.route_state.mapping_state = "pending"  # Always map as fallback
+                    self.route_state.next_instruction = f"Head toward {destination_name}."
 
                 # NOW start vision + obstacle detection
                 print("[system] Starting vision system...")
