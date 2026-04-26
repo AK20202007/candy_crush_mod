@@ -268,6 +268,7 @@ class RouteState(Serializable):
     next_instruction: Optional[str] = None
     next_turn_distance_m: Optional[float] = None
     off_route: bool = False
+    exit_seeking: bool = False
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "RouteState":
@@ -278,7 +279,12 @@ class RouteState(Serializable):
             next_instruction=data.get("next_instruction"),
             next_turn_distance_m=data.get("next_turn_distance_m"),
             off_route=bool(data.get("off_route", False)),
+            exit_seeking=bool(data.get("exit_seeking", False)),
         )
+
+
+INDOOR_LOCATION_TYPES = {"hallway", "room", "corridor", "building", "indoor"}
+OUTDOOR_LOCATION_TYPES = {"sidewalk", "street", "street_crossing", "outdoor"}
 
 
 @dataclass
@@ -292,6 +298,14 @@ class SceneState(Serializable):
     def __post_init__(self) -> None:
         self.visual_confidence = _bounded_float(self.visual_confidence, 0.7, 0.0, 1.0)
         self.map_confidence = _bounded_float(self.map_confidence, 0.0, 0.0, 1.0)
+
+    @property
+    def is_indoor(self) -> bool:
+        return self.location_type in INDOOR_LOCATION_TYPES
+
+    @property
+    def is_outdoor(self) -> bool:
+        return self.location_type in OUTDOOR_LOCATION_TYPES
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "SceneState":

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from typing import Optional
 
-from .agents import CrossingSignalAgent, FallbackAgent, IndoorNavigationAgent, OrientationAgent, SafetyAgent, SidewalkAgent, TargetFindingAgent, TrafficAgent, WayfindingAgent
+from .agents import CrossingSignalAgent, ExitSeekingAgent, FallbackAgent, IndoorNavigationAgent, OrientationAgent, SafetyAgent, SidewalkAgent, TargetFindingAgent, TrafficAgent, WayfindingAgent
 from .models import AgentAction, AgentDecision, FrameContext
 from .policy import SafetyPolicy
 

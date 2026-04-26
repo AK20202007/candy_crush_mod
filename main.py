@@ -557,6 +557,21 @@ Examples:
         choices=["head", "hand"],
         help="Camera mount position: 'head' for glasses/head-mounted, 'hand' for phone (default: hand)."
     )
+
+    # Address-to-address navigation
+    nav_group = parser.add_argument_group("Address Navigation")
+    nav_group.add_argument(
+        "--from-address",
+        type=str,
+        default=None,
+        help="Starting address for address-to-address navigation",
+    )
+    nav_group.add_argument(
+        "--to-address",
+        type=str,
+        default=None,
+        help="Destination address for address-to-address navigation",
+    )
     
     return parser
 
@@ -565,7 +580,36 @@ def main():
     """Main entry point."""
     parser = build_parser()
     args = parser.parse_args()
-    
+
+    # Address-to-address navigation planning
+    if getattr(args, "from_address", None) and getattr(args, "to_address", None):
+        try:
+            from address_navigation import NavigationPlanner, LegType
+
+            ors_key = (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip() or None
+            indoor_layout = os.environ.get("INDOOR_LAYOUT_JSON")
+            planner = NavigationPlanner(
+                ors_api_key=ors_key,
+                indoor_layout_path=indoor_layout,
+            )
+            plan = planner.plan(args.from_address, args.to_address)
+            print(f"\n{'=' * 60}")
+            print(f"NAVIGATION PLAN: {plan.origin} -> {plan.destination}")
+            print(f"  Origin indoor : {plan.origin_is_indoor}")
+            print(f"  Dest indoor   : {plan.destination_is_indoor}")
+            print(f"  Total steps   : {plan.total_steps}")
+            print(f"{'=' * 60}")
+            for i, leg in enumerate(plan.legs, 1):
+                print(f"\nLeg {i} ({leg.leg_type.value}):")
+                if leg.exit_strategy:
+                    print(f"  Exit strategy: {leg.exit_strategy.value}")
+                for step in leg.steps:
+                    print(f"    - {step}")
+        except Exception as exc:
+            print(f"[address-nav] Planning failed: {exc}")
+            import traceback
+            traceback.print_exc()
+
     app = NavigationApp()
     return app.run(args)
 
