@@ -79,6 +79,7 @@ class _Session:
     last_progress_lng: Optional[float] = None
     last_route_prompt_s: float = 0.0
     last_route_refresh_s: float = 0.0
+    exit_seeking: bool = False
 
 
 _sessions: Dict[str, _Session] = {}
@@ -270,7 +271,9 @@ def _process_jpeg_bytes(jpeg: bytes, session: _Session, engine: Any) -> Dict[str
     route: Optional[RouteState] = None
     if session.destination:
         route_msg = None
-        if session.route_steps and 0 <= session.route_index < len(session.route_steps):
+        if session.exit_seeking:
+            route_msg = "Leave the room first. Stand still, turn 360 degrees slowly, and scan for a door or exit sign."
+        elif session.route_steps and 0 <= session.route_index < len(session.route_steps):
             route_msg = session.route_steps[session.route_index]
         elif session.destination_address:
             route_msg = f"Navigating to {session.destination} ({session.destination_address})."
@@ -282,6 +285,7 @@ def _process_jpeg_bytes(jpeg: bytes, session: _Session, engine: Any) -> Dict[str
             next_instruction=route_msg,
             next_turn_distance_m=None,
             off_route=False,
+            exit_seeking=session.exit_seeking,
             mapping_state=session.mapping_state,
         )
     original_location_type = getattr(engine._cfg, "location_type", "indoor")
@@ -290,6 +294,10 @@ def _process_jpeg_bytes(jpeg: bytes, session: _Session, engine: Any) -> Dict[str
     try:
         decision = engine.process_frame_numpy(frame, route=route)
         payload = _build_frame_response(engine, decision)
+        ctx = getattr(engine, "_last_frame_context", None)
+        if ctx and ctx.route:
+            session.exit_seeking = bool(getattr(ctx.route, "exit_seeking", session.exit_seeking))
+            session.mapping_state = str(getattr(ctx.route, "mapping_state", session.mapping_state))
         payload["session"] = {
             "destination": session.destination,
             "destination_address": session.destination_address,
@@ -299,6 +307,8 @@ def _process_jpeg_bytes(jpeg: bytes, session: _Session, engine: Any) -> Dict[str
             "route_steps_total": len(session.route_steps or []),
             "route_current_instruction": route_msg,
             "route_provider": "google_directions" if session.route_step_targets else "planner_fallback",
+            "exit_seeking": session.exit_seeking,
+            "mapping_state": session.mapping_state,
             "location": (
                 {
                     "latitude": session.latitude,
@@ -333,7 +343,10 @@ def create_session(
     destination: str = Form(...),
     latitude: Optional[float] = Form(default=None),
     longitude: Optional[float] = Form(default=None),
+    indoor_start: Optional[str] = Form(default=None),
 ) -> Dict[str, Any]:
+    _get_engine()
+
     dest = (destination or "").strip()
     if not dest:
         raise HTTPException(status_code=400, detail="destination required")
@@ -378,6 +391,7 @@ def create_session(
     destination_lat = _to_float_or_none(resolved.get("lat"))
     destination_lng = _to_float_or_none(resolved.get("lng"))
 
+    start_indoors = str(indoor_start or "").strip().lower() in {"yes", "true", "1", "indoor"}
     draft = _Session(
         destination=destination_name,
         destination_address=destination_address,
@@ -387,13 +401,14 @@ def create_session(
         latitude=float(latitude) if latitude is not None else None,
         longitude=float(longitude) if longitude is not None else None,
         location_type=loc_type,
+        exit_seeking=start_indoors,
     )
     try:
         steps, mapping_state = _build_route_steps_for_session(draft)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     draft.route_steps = steps
-    draft.mapping_state = mapping_state
+    draft.mapping_state = "pending" if start_indoors else mapping_state
     if draft.route_step_targets and len(draft.route_steps or []) > 1:
         draft.route_index = 1
     draft.last_route_refresh_s = time.time()
@@ -421,6 +436,7 @@ def create_session(
         "route_steps_total": len(draft.route_steps or []),
         "route_first_instruction": (draft.route_steps or [f"Head toward {draft.destination}."])[0],
         "mapping_state": draft.mapping_state,
+        "exit_seeking": draft.exit_seeking,
     }
 
 
@@ -497,6 +513,8 @@ def update_session_location(
             else f"Head toward {session.destination}."
         ),
         "route_provider": "google_directions" if session.route_step_targets else "planner_fallback",
+        "exit_seeking": session.exit_seeking,
+        "mapping_state": session.mapping_state,
     }
 
 

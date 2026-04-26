@@ -372,10 +372,18 @@ class SafetyAgent(BaseAgent):
         if ctx.motion.is_moving:
             for surface in ctx.surfaces:
                 if surface.kind in {SurfaceKind.OBSTACLE_EDGE, SurfaceKind.WALL}:
+                    if surface.direction not in {Direction.CENTER, Direction.SLIGHT_LEFT, Direction.SLIGHT_RIGHT}:
+                        continue
                     # Only trigger if confident and close enough
-                    min_confidence = 0.58 if surface.kind == SurfaceKind.WALL else 0.5
-                    max_distance = 1.5 if surface.kind == SurfaceKind.WALL else 1.2
-                    if surface.confidence >= min_confidence and surface.distance_m is not None and surface.distance_m <= max_distance:
+                    min_confidence = 0.70 if surface.kind == SurfaceKind.WALL else 0.62
+                    max_distance = 1.0 if surface.kind == SurfaceKind.WALL else 0.9
+                    min_near_field = 0.12 if surface.kind == SurfaceKind.WALL else 0.10
+                    if (
+                        surface.confidence >= min_confidence
+                        and surface.distance_m is not None
+                        and surface.distance_m <= max_distance
+                        and float(surface.near_field_ratio or 0.0) >= min_near_field
+                    ):
                         priority = 95 if surface.distance_m <= 0.8 else 85
                         avoidance = _avoidance_phrase(surface.direction, surface.distance_m)
                         # Omit distance for immediate obstacles (≤1.0m) for brevity

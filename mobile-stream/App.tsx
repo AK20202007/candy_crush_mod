@@ -21,6 +21,10 @@ type StreamJson = {
   decision?: { message?: string; priority?: number; action?: string };
 };
 
+type SessionJson = {
+  session_id?: string;
+};
+
 function normalizeBase(url: string): string {
   return url.trim().replace(/\/+$/, '');
 }
@@ -70,6 +74,7 @@ export default function App() {
 
   const [baseUrl, setBaseUrl] = useState('http://192.168.1.1:8765');
   const [destination, setDestination] = useState('Library');
+  const [startIndoors, setStartIndoors] = useState(true);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [streaming, setStreaming] = useState(false);
   const [cameraReady, setCameraReady] = useState(false);
@@ -156,13 +161,14 @@ export default function App() {
 
       const fd = new FormData();
       fd.append('destination', destination.trim() || 'Unknown');
+      fd.append('indoor_start', startIndoors ? 'yes' : 'no');
       const res = await fetchWithTimeout(`${base}/stream/session`, { method: 'POST', body: fd }, SESSION_TIMEOUT_MS);
       if (!res.ok) {
         appendLog(`session HTTP ${res.status}: ${await res.text()}`);
         setSessionId(null);
         return null;
       }
-      const j = (await res.json()) as { session_id?: string };
+      const j = (await res.json()) as SessionJson;
       if (!j.session_id) {
         appendLog('session: missing session_id in JSON');
         setSessionId(null);
@@ -185,7 +191,7 @@ export default function App() {
     } finally {
       setBusy(false);
     }
-  }, [appendLog, baseUrl, destination]);
+  }, [appendLog, baseUrl, destination, startIndoors]);
 
   const sendOneFrame = useCallback(async () => {
     const base = normalizeBase(baseUrl);
@@ -340,6 +346,36 @@ export default function App() {
           placeholder="Library"
           placeholderTextColor="#666"
         />
+
+        <Text style={styles.label}>Start mode</Text>
+        <View style={styles.row}>
+          <Pressable
+            style={({ pressed }) => [
+              styles.actionBtn,
+              startIndoors ? styles.actionPrimary : styles.actionSecondary,
+              controlsLocked && styles.actionDisabled,
+              pressed && styles.actionPressed,
+            ]}
+            onPress={() => setStartIndoors(true)}
+            disabled={controlsLocked}
+            hitSlop={8}
+          >
+            <Text style={styles.actionLabel}>Indoor (find door first)</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [
+              styles.actionBtn,
+              !startIndoors ? styles.actionPrimary : styles.actionSecondary,
+              controlsLocked && styles.actionDisabled,
+              pressed && styles.actionPressed,
+            ]}
+            onPress={() => setStartIndoors(false)}
+            disabled={controlsLocked}
+            hitSlop={8}
+          >
+            <Text style={styles.actionLabel}>Outdoor</Text>
+          </Pressable>
+        </View>
 
         <View style={styles.row}>
           <Pressable

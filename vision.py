@@ -1083,12 +1083,11 @@ class VisionSystem:
         )
 
     def _detect_door(self, frame: np.ndarray, w: int, h: int) -> Optional[SurfaceObservation]:
-        """Door and handle detection are disabled for mobile/web flow."""
-        return None
+        """Detect possible doors/handles with conservative confidence gating.
 
-        This is deliberately conservative. Handle-like lines are not enough on
-        their own; they must appear inside a door-frame context and persist for
-        several calls before a possible doorway surface is returned.
+        This stays conservative: handle-like lines are not enough on their own.
+        We only emit a door surface when handle or frame context is strong and
+        persistent across multiple calls.
         """
         handle = self._detect_door_handle(frame, w, h)
         frame_context = self._detect_door_frame_context(frame, w, h)
