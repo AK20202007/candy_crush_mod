@@ -35,16 +35,18 @@ class IntelligentSpeechController:
         self.ui = user_interface or UserInterface()
         
         # Speech queues by priority
-        self._critical_queue: queue.Queue[str] = queue.Queue()      # Immediate danger
-        self._urgent_queue: queue.Queue[str] = queue.Queue()      # Warnings
-        self._normal_queue: queue.Queue[str] = queue.Queue()      # Navigation
-        self._info_queue: queue.Queue[str] = queue.Queue()        # General info
+        self._critical_queue: queue.Queue[tuple[str, int]] = queue.Queue()      # Immediate danger
+        self._urgent_queue: queue.Queue[tuple[str, int]] = queue.Queue()      # Warnings
+        self._normal_queue: queue.Queue[tuple[str, int]] = queue.Queue()      # Navigation
+        self._info_queue: queue.Queue[tuple[str, int]] = queue.Queue()        # General info
         
         # Control
         self._stop = threading.Event()
         self._pause = threading.Event()
         self._thread = threading.Thread(target=self._worker, name="SpeechWorker", daemon=True)
         self._current_message: Optional[str] = None
+        self._current_priority: int = 0
+        self._current_process: Optional[subprocess.Popen] = None
         self._speaking_start_time: Optional[float] = None
         self._queue_lock = threading.Lock()
         
@@ -64,7 +66,7 @@ class IntelligentSpeechController:
         # Unblock queues
         for q in [self._critical_queue, self._urgent_queue, self._normal_queue, self._info_queue]:
             try:
-                q.put_nowait("")
+                q.put_nowait(("", 0))
             except queue.Full:
                 pass
         if self._thread.is_alive() and threading.current_thread() is not self._thread:
@@ -109,23 +111,26 @@ class IntelligentSpeechController:
             message = self.ui.format_message_for_user(message)
         
         # Check if we should speak this message
-        should_force = force or alert_type == AlertType.CRITICAL or priority >= 90
+        should_force = force or alert_type == AlertType.CRITICAL
         if not self.ui.should_speak(message, alert_type, priority, should_force):
             self._messages_suppressed += 1
             return False
         
         with self._queue_lock:
+            if priority >= 90:
+                self._interrupt_current_speech(priority)
+
             # Queue based on priority. Non-critical queues keep only the latest
             # item so delayed speech never catches up with stale frame messages.
             if alert_type == AlertType.CRITICAL or priority >= 90:
                 self._drain_all_queues()
-                self._critical_queue.put(message)
+                self._critical_queue.put((message, priority))
             elif alert_type == AlertType.WARNING or priority >= 70:
-                self._replace_queue(self._urgent_queue, message)
+                self._replace_queue(self._urgent_queue, message, priority)
             elif alert_type == AlertType.GUIDANCE:
-                self._replace_queue(self._normal_queue, message)
+                self._replace_queue(self._normal_queue, message, priority)
             else:
-                self._replace_queue(self._info_queue, message)
+                self._replace_queue(self._info_queue, message, priority)
         
         return True
     
@@ -167,47 +172,69 @@ class IntelligentSpeechController:
             except queue.Empty:
                 pass
 
+    def _interrupt_current_speech(self, priority: int) -> None:
+        """Stop lower-priority macOS speech so urgent guidance can be heard."""
+        if sys.platform != "darwin":
+            return
+        if self._current_priority >= priority:
+            return
+        proc = self._current_process
+        if proc is None or proc.poll() is not None:
+            return
+        proc.terminate()
+        try:
+            proc.wait(timeout=0.4)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
     @staticmethod
-    def _replace_queue(q: queue.Queue[str], message: str) -> None:
+    def _replace_queue(q: queue.Queue[tuple[str, int]], message: str, priority: int) -> None:
         """Keep only the newest message for a priority lane."""
         try:
             while True:
                 q.get_nowait()
         except queue.Empty:
             pass
-        q.put(message)
+        q.put((message, priority))
+
+    @staticmethod
+    def _queue_item(item, default_priority: int) -> tuple[str, int]:
+        if isinstance(item, tuple):
+            message, priority = item
+            return str(message), int(priority)
+        return str(item), default_priority
     
-    def _get_next_message(self) -> Optional[tuple[str, AlertType]]:
+    def _get_next_message(self) -> Optional[tuple[str, AlertType, int]]:
         """Get next message from queues in priority order."""
         # Check critical first
         try:
-            msg = self._critical_queue.get_nowait()
+            msg, priority = self._queue_item(self._critical_queue.get_nowait(), 100)
             if msg:
-                return (msg, AlertType.CRITICAL)
+                return (msg, AlertType.CRITICAL, priority)
         except queue.Empty:
             pass
         
         # Check urgent
         try:
-            msg = self._urgent_queue.get_nowait()
+            msg, priority = self._queue_item(self._urgent_queue.get_nowait(), 80)
             if msg:
-                return (msg, AlertType.WARNING)
+                return (msg, AlertType.WARNING, priority)
         except queue.Empty:
             pass
         
         # Check normal with timeout
         try:
-            msg = self._normal_queue.get(timeout=0.5)
+            msg, priority = self._queue_item(self._normal_queue.get(timeout=0.5), 60)
             if msg:
-                return (msg, AlertType.GUIDANCE)
+                return (msg, AlertType.GUIDANCE, priority)
         except queue.Empty:
             pass
         
         # Check info with timeout
         try:
-            msg = self._info_queue.get(timeout=0.3)
+            msg, priority = self._queue_item(self._info_queue.get(timeout=0.3), 30)
             if msg:
-                return (msg, AlertType.INFO)
+                return (msg, AlertType.INFO, priority)
         except queue.Empty:
             pass
         
@@ -237,7 +264,7 @@ class IntelligentSpeechController:
             if result is None:
                 continue
             
-            message, alert_type = result
+            message, alert_type, priority = result
             
             # Skip empty messages
             if not message.strip():
@@ -246,6 +273,7 @@ class IntelligentSpeechController:
             try:
                 # Speak the message
                 self._current_message = message
+                self._current_priority = priority
                 self._speaking_start_time = time.time()
                 
                 time.sleep(0.05)
@@ -262,12 +290,22 @@ class IntelligentSpeechController:
                 print(f"[speech] Error speaking message: {e}")
             finally:
                 self._current_message = None
+                self._current_priority = 0
                 self._speaking_start_time = None
 
     def _speak_message(self, engine, message: str) -> None:
         if sys.platform == "darwin":
             rate = int(190 * self.ui.preferences.speech_rate)
-            subprocess.run(["say", "-r", str(rate), message], check=False)
+            proc = subprocess.Popen(["say", "-r", str(rate), message])
+            self._current_process = proc
+            try:
+                while proc.poll() is None and not self._stop.is_set():
+                    time.sleep(0.05)
+                if self._stop.is_set() and proc.poll() is None:
+                    proc.terminate()
+            finally:
+                if self._current_process is proc:
+                    self._current_process = None
             return
         engine.say(message + " ")
         engine.runAndWait()

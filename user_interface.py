@@ -211,10 +211,12 @@ class UserInterface:
             if time_since_last < timing.min_repeat_interval_ms:
                 return False
         
-        # Check global speech rate limiting
+        # Check global speech rate limiting. High-priority non-critical guidance
+        # such as a detected door handle must be allowed to break through a
+        # just-spoken route prompt, but exact repeat timing above still applies.
         time_since_last_speech = now_ms - self._last_speech_time_ms
         min_gap = 500 if alert_type == AlertType.CRITICAL else 1000
-        if time_since_last_speech < min_gap:
+        if priority < 90 and time_since_last_speech < min_gap:
             return False
         
         self._record_speech(message, alert_type, now_ms)
