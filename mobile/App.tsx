@@ -68,6 +68,7 @@ export default function App(): React.JSX.Element {
   const [distanceToTargetM, setDistanceToTargetM] = useState<number | null>(null);
   const [lastWarning, setLastWarning] = useState<HazardWarning | null>(null);
   const [logLines, setLogLines] = useState<string[]>([]);
+  const [clockText, setClockText] = useState(formatTime());
 
   const watchRef = useRef<Location.LocationSubscription | null>(null);
   const stepsRef = useRef<RouteStep[]>([]);
@@ -81,6 +82,27 @@ export default function App(): React.JSX.Element {
   const destinationText = destination.trim();
   const isBusy = phase === "locating" || phase === "routing";
   const isNavigating = phase === "navigating";
+  const isVisionActive = visionState === "on";
+  const visionCopy =
+    visionState === "on"
+      ? "AI Vision Active"
+      : visionState === "starting"
+        ? "AI Vision Starting"
+        : visionState === "error"
+          ? "AI Vision Error"
+          : hasNativeVision
+            ? "AI Vision Ready"
+            : "AI Vision Offline";
+  const routeCopy = currentStep?.instruction ?? (phase === "arrived" ? "Destination area reached" : "Set destination and start");
+  const warningCopy = lastWarning?.message ?? (isVisionActive ? "No obstacle warning" : "Vision standby");
+  const secondaryAlertCopy =
+    phase === "error"
+      ? "Check setup and try again"
+      : distanceToTargetM != null
+        ? `Next target in ${walkingSteps(distanceToTargetM)}`
+        : navApiBaseUrl
+          ? "Cloud detector linked"
+          : "Local detector mode";
 
   const addLog = useCallback((line: string) => {
     setLogLines((prev) => [`${formatTime()} ${line}`, ...prev].slice(0, 8));
@@ -334,76 +356,107 @@ export default function App(): React.JSX.Element {
     };
   }, [addLog, removeLocationWatch, speak]);
 
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setClockText(formatTime());
+    }, 15_000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, []);
+
   return (
     <SafeAreaView style={styles.root}>
-      <View style={styles.header}>
-        <Text style={styles.kicker}>LAHacks Nav</Text>
-        <Text style={styles.title}>Walking Route</Text>
-        <View style={styles.statusRow}>
-          <StatusPill label={phase} tone={phase === "error" ? "danger" : isNavigating ? "active" : "neutral"} />
-          <StatusPill label={`vision ${visionState}`} tone={visionState === "on" ? "active" : visionState === "error" ? "danger" : "neutral"} />
-          <StatusPill label={navApiStatus} tone={navApiBaseUrl ? "active" : "neutral"} />
-        </View>
+      <View style={styles.topBar}>
+        <Text style={[styles.topStatus, isVisionActive ? styles.topStatusActive : styles.topStatusIdle]} numberOfLines={1}>
+          {visionCopy}
+        </Text>
+        <Text style={styles.topClock}>{clockText}</Text>
+        <Text style={styles.topMode}>{navApiBaseUrl ? "Cloud" : "Local"}</Text>
       </View>
 
       <ScrollView style={styles.content} contentContainerStyle={styles.contentInner} keyboardShouldPersistTaps="handled">
-        <View style={styles.panel}>
-          <Text style={styles.label}>Destination</Text>
+        <View style={styles.hero}>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Set destination by voice"
+            disabled={isBusy || isNavigating}
+            onPress={() => {
+              void useVoiceDestination();
+            }}
+            style={({ pressed }) => [styles.micButton, pressed && !isBusy && !isNavigating ? styles.micButtonPressed : null]}
+          >
+            <MicGlyph />
+          </Pressable>
+          <VoiceBars active={isVisionActive || isBusy} />
+        </View>
+
+        <View style={styles.destinationPill}>
+          <PinGlyph />
           <TextInput
             value={destination}
             onChangeText={setDestination}
-            placeholder="Enter an address or place"
-            placeholderTextColor="#6b7280"
-            style={styles.input}
+            placeholder="Main Entrance"
+            placeholderTextColor="#ffffff"
+            style={styles.destinationInput}
             autoCapitalize="words"
             returnKeyType="go"
             onSubmitEditing={() => {
               void loadRoute();
             }}
           />
-          <View style={styles.buttonRow}>
-            <ActionButton label="Voice" onPress={useVoiceDestination} disabled={isBusy || isNavigating} variant="secondary" />
-            <ActionButton label={isBusy ? "Loading" : "Start"} onPress={loadRoute} disabled={isBusy || !destinationText} />
-            <ActionButton label="Stop" onPress={stopAll} disabled={phase === "idle" && visionState !== "on"} variant="danger" />
-          </View>
         </View>
 
-        <View style={styles.routePanel}>
-          <View style={styles.routeHeader}>
-            <Text style={styles.sectionTitle}>Current Step</Text>
-            {isBusy ? <ActivityIndicator color="#0f766e" /> : null}
+        <Pressable
+          accessibilityRole="button"
+          disabled={isBusy || !destinationText}
+          onPress={() => {
+            void loadRoute();
+          }}
+          style={({ pressed }) => [styles.guidanceCard, pressed && !isBusy && destinationText ? styles.cardPressed : null]}
+        >
+          <NavGlyph />
+          <View style={styles.guidanceTextWrap}>
+            <Text style={styles.guidanceText} numberOfLines={2}>
+              {routeCopy}
+            </Text>
+            {routeSteps.length > 0 ? (
+              <Text style={styles.guidanceMeta}>
+                {Math.min(currentStepIndex + 1, routeSteps.length)} of {routeSteps.length} steps
+              </Text>
+            ) : null}
           </View>
-          <Text style={styles.stepCount}>
-            {routeSteps.length > 0 ? `${Math.min(currentStepIndex + 1, routeSteps.length)} of ${routeSteps.length}` : "No route loaded"}
-          </Text>
-          <Text style={styles.currentInstruction}>
-            {currentStep?.instruction ?? (phase === "arrived" ? "Destination area reached." : "Set a destination and start navigation.")}
-          </Text>
-          <Text style={styles.distanceText}>Next target: {walkingSteps(distanceToTargetM)}</Text>
-        </View>
+          {isBusy ? <ActivityIndicator color="#3b82f6" /> : null}
+        </Pressable>
 
-        {lastWarning ? (
-          <View style={[styles.warningPanel, lastWarning.level === "urgent" ? styles.warningUrgent : styles.warningNormal]}>
-            <Text style={styles.warningLabel}>{lastWarning.level === "urgent" ? "Urgent Warning" : "Warning"}</Text>
-            <Text style={styles.warningMessage}>{lastWarning.message}</Text>
-          </View>
-        ) : null}
-
-        <View style={styles.panel}>
-          <Text style={styles.sectionTitle}>Location</Text>
-          <Text style={styles.metaText}>
-            {currentLocation ? `${currentLocation.lat.toFixed(6)}, ${currentLocation.lon.toFixed(6)}` : "Waiting for GPS"}
+        <View style={[styles.alertCard, lastWarning?.level === "urgent" ? styles.alertUrgent : styles.alertNormal]}>
+          <AlertGlyph tone={lastWarning?.level === "urgent" ? "urgent" : "normal"} />
+          <Text style={[styles.alertText, !lastWarning ? styles.alertTextIdle : null]} numberOfLines={2}>
+            {warningCopy}
           </Text>
         </View>
 
-        <View style={styles.panel}>
-          <Text style={styles.sectionTitle}>Cloudflare API</Text>
-          <Text style={styles.metaText}>{navApiBaseUrl || "Not configured"}</Text>
+        <View style={[styles.alertCard, phase === "error" ? styles.alertDanger : styles.alertMuted]}>
+          <AlertGlyph tone={phase === "error" ? "danger" : "muted"} />
+          <Text style={[styles.alertText, phase === "error" ? null : styles.alertTextMuted]} numberOfLines={2}>
+            {secondaryAlertCopy}
+          </Text>
+        </View>
+
+        <View style={styles.buttonRow}>
+          <ActionButton label="Voice" onPress={useVoiceDestination} disabled={isBusy || isNavigating} variant="secondary" />
+          <ActionButton label={isBusy ? "Loading" : isNavigating ? "Reroute" : "Start"} onPress={loadRoute} disabled={isBusy || !destinationText} />
+          <ActionButton label="Stop" onPress={stopAll} disabled={phase === "idle" && visionState !== "on"} variant="danger" />
+        </View>
+
+        <View style={styles.statusShelf}>
+          <StatusPill label={phase} tone={phase === "error" ? "danger" : isNavigating ? "active" : "neutral"} />
+          <StatusPill label={`vision ${visionState}`} tone={visionState === "on" ? "active" : visionState === "error" ? "danger" : "neutral"} />
+          <StatusPill label={navApiStatus} tone={navApiBaseUrl ? "active" : "neutral"} />
         </View>
 
         {routeSteps.length > 0 ? (
-          <View style={styles.panel}>
-            <Text style={styles.sectionTitle}>Route Steps</Text>
+          <View style={styles.detailPanel}>
             {routeSteps.map((step, index) => (
               <View key={`${index}-${step.instruction}`} style={[styles.stepRow, index === currentStepIndex ? styles.stepRowActive : null]}>
                 <Text style={[styles.stepNumber, index === currentStepIndex ? styles.stepNumberActive : null]}>{index + 1}</Text>
@@ -413,9 +466,10 @@ export default function App(): React.JSX.Element {
           </View>
         ) : null}
 
-        <View style={styles.panel}>
-          <Text style={styles.sectionTitle}>Activity</Text>
-          {logLines.length === 0 ? <Text style={styles.metaText}>No activity yet.</Text> : null}
+        <View style={styles.detailPanel}>
+          <Text style={styles.detailTitle}>
+            {currentLocation ? `${currentLocation.lat.toFixed(6)}, ${currentLocation.lon.toFixed(6)}` : "Waiting for GPS"}
+          </Text>
           {logLines.map((line) => (
             <Text key={line} style={styles.logText}>
               {line}
@@ -424,6 +478,62 @@ export default function App(): React.JSX.Element {
         </View>
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function MicGlyph(): React.JSX.Element {
+  return (
+    <View style={styles.micGlyph}>
+      <View style={styles.micHead} />
+      <View style={styles.micArc} />
+      <View style={styles.micStem} />
+      <View style={styles.micBase} />
+    </View>
+  );
+}
+
+function VoiceBars({ active }: { active: boolean }): React.JSX.Element {
+  return (
+    <View style={styles.voiceBars} accessibilityElementsHidden>
+      {[0, 1, 2, 3, 4].map((bar) => (
+        <View
+          key={bar}
+          style={[
+            styles.voiceBar,
+            active ? styles.voiceBarActive : styles.voiceBarIdle,
+            bar === 0 || bar === 4 ? styles.voiceBarShort : null,
+            bar === 1 || bar === 3 ? styles.voiceBarMedium : null,
+            bar === 2 ? styles.voiceBarTall : null
+          ]}
+        />
+      ))}
+    </View>
+  );
+}
+
+function PinGlyph(): React.JSX.Element {
+  return (
+    <View style={styles.pinGlyph}>
+      <View style={styles.pinDot} />
+    </View>
+  );
+}
+
+function NavGlyph(): React.JSX.Element {
+  return (
+    <View style={styles.navGlyph}>
+      <View style={styles.navNeedle} />
+    </View>
+  );
+}
+
+function AlertGlyph({ tone }: { tone: "normal" | "urgent" | "danger" | "muted" }): React.JSX.Element {
+  return (
+    <View style={[styles.alertGlyph, tone === "danger" ? styles.alertGlyphDanger : tone === "muted" ? styles.alertGlyphMuted : null]}>
+      <Text style={[styles.alertGlyphText, tone === "danger" ? styles.alertGlyphTextDanger : tone === "muted" ? styles.alertGlyphTextMuted : null]}>
+        !
+      </Text>
+    </View>
   );
 }
 
@@ -480,219 +590,401 @@ function ActionButton({
 const styles = StyleSheet.create({
   root: {
     flex: 1,
-    backgroundColor: "#eef2f3"
+    backgroundColor: "#030712"
   },
-  header: {
-    backgroundColor: "#102a2d",
-    paddingHorizontal: 20,
-    paddingBottom: 18,
-    paddingTop: 18
-  },
-  kicker: {
-    color: "#9dd3c7",
-    fontSize: 13,
-    fontWeight: "700",
-    letterSpacing: 0,
-    textTransform: "uppercase"
-  },
-  title: {
-    color: "#ffffff",
-    fontSize: 30,
-    fontWeight: "800",
-    letterSpacing: 0,
-    marginTop: 4
-  },
-  statusRow: {
+  topBar: {
+    alignItems: "center",
+    backgroundColor: "#050814",
+    borderBottomColor: "#111827",
+    borderBottomWidth: 1,
     flexDirection: "row",
-    flexWrap: "wrap",
-    gap: 8,
-    marginTop: 14
+    justifyContent: "space-between",
+    minHeight: 58,
+    paddingHorizontal: 28
   },
-  statusPill: {
-    borderColor: "#6b7c80",
-    borderRadius: 999,
-    borderWidth: 1,
-    paddingHorizontal: 10,
-    paddingVertical: 5
+  topStatus: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: "800",
+    letterSpacing: 0
   },
-  statusActive: {
-    backgroundColor: "#d7f3e7",
-    borderColor: "#54b58e"
+  topStatusActive: {
+    color: "#22c55e"
   },
-  statusDanger: {
-    backgroundColor: "#ffe4df",
-    borderColor: "#f9735b"
+  topStatusIdle: {
+    color: "#93a4b8"
   },
-  statusText: {
-    color: "#d4dee0",
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 0,
-    textTransform: "uppercase"
+  topClock: {
+    color: "#f8fafc",
+    flex: 1,
+    fontSize: 16,
+    fontWeight: "800",
+    textAlign: "center"
   },
-  statusTextActive: {
-    color: "#0f5138"
-  },
-  statusTextDanger: {
-    color: "#9f1d14"
+  topMode: {
+    color: "#f8fafc",
+    flex: 1,
+    fontSize: 15,
+    fontWeight: "800",
+    textAlign: "right"
   },
   content: {
     flex: 1
   },
   contentInner: {
-    gap: 12,
-    padding: 14,
-    paddingBottom: 36
+    alignItems: "center",
+    gap: 16,
+    minHeight: "100%",
+    paddingHorizontal: 28,
+    paddingBottom: 32,
+    paddingTop: 56
   },
-  panel: {
+  hero: {
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 10,
+    minHeight: 230
+  },
+  micButton: {
+    alignItems: "center",
+    backgroundColor: "#2f80f6",
+    borderRadius: 96,
+    height: 132,
+    justifyContent: "center",
+    shadowColor: "#2563eb",
+    shadowOffset: { width: 0, height: 16 },
+    shadowOpacity: 0.22,
+    shadowRadius: 26,
+    width: 132
+  },
+  micButtonPressed: {
+    opacity: 0.78,
+    transform: [{ scale: 0.98 }]
+  },
+  micGlyph: {
+    alignItems: "center",
+    height: 76,
+    justifyContent: "center",
+    width: 58
+  },
+  micHead: {
     backgroundColor: "#ffffff",
-    borderColor: "#d8dee2",
-    borderRadius: 8,
-    borderWidth: 1,
-    padding: 14
+    borderRadius: 14,
+    height: 43,
+    width: 24
   },
-  routePanel: {
+  micArc: {
+    borderBottomColor: "#ffffff",
+    borderBottomWidth: 6,
+    borderLeftColor: "#ffffff",
+    borderLeftWidth: 6,
+    borderRadius: 22,
+    borderRightColor: "#ffffff",
+    borderRightWidth: 6,
+    height: 34,
+    marginTop: -24,
+    width: 44
+  },
+  micStem: {
     backgroundColor: "#ffffff",
-    borderColor: "#b7d4d0",
-    borderRadius: 8,
-    borderWidth: 1,
-    padding: 16
+    height: 15,
+    marginTop: -2,
+    width: 6
   },
-  label: {
-    color: "#334155",
-    fontSize: 13,
-    fontWeight: "700",
-    marginBottom: 8
+  micBase: {
+    backgroundColor: "#ffffff",
+    height: 5,
+    width: 18
   },
-  input: {
-    backgroundColor: "#f8fafc",
-    borderColor: "#b9c4cc",
-    borderRadius: 6,
-    borderWidth: 1,
-    color: "#111827",
-    fontSize: 17,
-    minHeight: 48,
-    paddingHorizontal: 12,
-    paddingVertical: 10
-  },
-  buttonRow: {
+  voiceBars: {
+    alignItems: "flex-end",
     flexDirection: "row",
     gap: 8,
-    marginTop: 12
+    height: 64,
+    justifyContent: "center",
+    marginTop: 30
+  },
+  voiceBar: {
+    borderRadius: 8,
+    width: 12
+  },
+  voiceBarActive: {
+    backgroundColor: "#2f80f6"
+  },
+  voiceBarIdle: {
+    backgroundColor: "#1e3a8a"
+  },
+  voiceBarShort: {
+    height: 24
+  },
+  voiceBarMedium: {
+    height: 42
+  },
+  voiceBarTall: {
+    height: 54
+  },
+  destinationPill: {
+    alignItems: "center",
+    alignSelf: "center",
+    backgroundColor: "#111827",
+    borderColor: "#334863",
+    borderRadius: 999,
+    borderWidth: 2,
+    flexDirection: "row",
+    gap: 14,
+    maxWidth: 390,
+    minHeight: 76,
+    paddingHorizontal: 28,
+    width: "82%"
+  },
+  destinationInput: {
+    color: "#ffffff",
+    flex: 1,
+    fontSize: 24,
+    fontWeight: "800",
+    minHeight: 52,
+    paddingVertical: 6
+  },
+  pinGlyph: {
+    alignItems: "center",
+    borderColor: "#3b82f6",
+    borderRadius: 16,
+    borderWidth: 3,
+    height: 30,
+    justifyContent: "center",
+    transform: [{ rotate: "45deg" }],
+    width: 30
+  },
+  pinDot: {
+    backgroundColor: "#3b82f6",
+    borderRadius: 5,
+    height: 9,
+    width: 9
+  },
+  guidanceCard: {
+    alignItems: "center",
+    alignSelf: "stretch",
+    backgroundColor: "#071d43",
+    borderColor: "#1d6ff2",
+    borderRadius: 24,
+    borderWidth: 2,
+    flexDirection: "row",
+    gap: 18,
+    minHeight: 88,
+    paddingHorizontal: 28,
+    paddingVertical: 18
+  },
+  cardPressed: {
+    opacity: 0.78
+  },
+  navGlyph: {
+    borderBottomColor: "transparent",
+    borderBottomWidth: 14,
+    borderLeftColor: "#4e9aff",
+    borderLeftWidth: 22,
+    borderTopColor: "transparent",
+    borderTopWidth: 14,
+    height: 0,
+    transform: [{ rotate: "-38deg" }],
+    width: 0
+  },
+  navNeedle: {
+    backgroundColor: "#4e9aff",
+    height: 24,
+    left: -11,
+    position: "absolute",
+    top: -2,
+    width: 4
+  },
+  guidanceTextWrap: {
+    flex: 1
+  },
+  guidanceText: {
+    color: "#ffffff",
+    fontSize: 24,
+    fontWeight: "800",
+    letterSpacing: 0,
+    lineHeight: 31
+  },
+  guidanceMeta: {
+    color: "#82b4ff",
+    fontSize: 13,
+    fontWeight: "800",
+    marginTop: 4
+  },
+  alertCard: {
+    alignItems: "center",
+    alignSelf: "stretch",
+    borderRadius: 24,
+    borderWidth: 2,
+    flexDirection: "row",
+    gap: 18,
+    minHeight: 88,
+    paddingHorizontal: 28,
+    paddingVertical: 18
+  },
+  alertNormal: {
+    backgroundColor: "#352500",
+    borderColor: "#b78a00"
+  },
+  alertUrgent: {
+    backgroundColor: "#3d2600",
+    borderColor: "#facc15"
+  },
+  alertDanger: {
+    backgroundColor: "#2a0509",
+    borderColor: "#9f1239"
+  },
+  alertMuted: {
+    backgroundColor: "#22080b",
+    borderColor: "#7f1d1d"
+  },
+  alertGlyph: {
+    alignItems: "center",
+    borderColor: "#facc15",
+    borderRadius: 18,
+    borderWidth: 3,
+    height: 36,
+    justifyContent: "center",
+    width: 36
+  },
+  alertGlyphDanger: {
+    borderColor: "#f87171"
+  },
+  alertGlyphMuted: {
+    borderColor: "#9ca3af",
+    opacity: 0.65
+  },
+  alertGlyphText: {
+    color: "#facc15",
+    fontSize: 20,
+    fontWeight: "900"
+  },
+  alertGlyphTextDanger: {
+    color: "#f87171"
+  },
+  alertGlyphTextMuted: {
+    color: "#9ca3af"
+  },
+  alertText: {
+    color: "#ffffff",
+    flex: 1,
+    fontSize: 23,
+    fontWeight: "800",
+    letterSpacing: 0,
+    lineHeight: 30
+  },
+  alertTextIdle: {
+    color: "#f7d874"
+  },
+  alertTextMuted: {
+    color: "#a49aa0"
+  },
+  buttonRow: {
+    alignSelf: "stretch",
+    flexDirection: "row",
+    gap: 10,
+    marginTop: 2
   },
   button: {
     alignItems: "center",
-    backgroundColor: "#0f766e",
-    borderColor: "#0f766e",
-    borderRadius: 6,
+    backgroundColor: "#2563eb",
+    borderColor: "#3b82f6",
+    borderRadius: 18,
     borderWidth: 1,
     flex: 1,
-    minHeight: 46,
     justifyContent: "center",
+    minHeight: 54,
     paddingHorizontal: 10
   },
   buttonSecondary: {
-    backgroundColor: "#ffffff",
-    borderColor: "#64748b"
+    backgroundColor: "#101827",
+    borderColor: "#31435f"
   },
   buttonDanger: {
-    backgroundColor: "#fff7ed",
-    borderColor: "#ea580c"
+    backgroundColor: "#2a0b10",
+    borderColor: "#b91c1c"
   },
   buttonPressed: {
-    opacity: 0.75
+    opacity: 0.72
   },
   buttonDisabled: {
-    backgroundColor: "#e5e7eb",
-    borderColor: "#d1d5db"
+    backgroundColor: "#111827",
+    borderColor: "#1f2937"
   },
   buttonText: {
     color: "#ffffff",
     fontSize: 15,
-    fontWeight: "800"
+    fontWeight: "900"
   },
   buttonTextSecondary: {
-    color: "#334155"
+    color: "#dbeafe"
   },
   buttonTextDanger: {
-    color: "#9a3412"
+    color: "#fecaca"
   },
   buttonTextDisabled: {
-    color: "#6b7280"
+    color: "#64748b"
   },
-  routeHeader: {
-    alignItems: "center",
+  statusShelf: {
+    alignSelf: "stretch",
     flexDirection: "row",
-    justifyContent: "space-between"
+    flexWrap: "wrap",
+    gap: 8,
+    justifyContent: "center"
   },
-  sectionTitle: {
-    color: "#111827",
-    fontSize: 16,
-    fontWeight: "800",
-    letterSpacing: 0
+  statusPill: {
+    backgroundColor: "#0f172a",
+    borderColor: "#253448",
+    borderRadius: 999,
+    borderWidth: 1,
+    paddingHorizontal: 11,
+    paddingVertical: 6
   },
-  stepCount: {
-    color: "#64748b",
-    fontSize: 13,
-    fontWeight: "700",
-    marginTop: 8
+  statusActive: {
+    backgroundColor: "#052e1b",
+    borderColor: "#16a34a"
   },
-  currentInstruction: {
-    color: "#0f172a",
-    fontSize: 22,
-    fontWeight: "800",
+  statusDanger: {
+    backgroundColor: "#3a0a0a",
+    borderColor: "#dc2626"
+  },
+  statusText: {
+    color: "#9ca3af",
+    fontSize: 12,
+    fontWeight: "900",
     letterSpacing: 0,
-    lineHeight: 29,
-    marginTop: 8
+    textTransform: "uppercase"
   },
-  distanceText: {
-    color: "#0f766e",
-    fontSize: 15,
-    fontWeight: "800",
-    marginTop: 10
+  statusTextActive: {
+    color: "#86efac"
   },
-  warningPanel: {
-    borderRadius: 8,
+  statusTextDanger: {
+    color: "#fecaca"
+  },
+  detailPanel: {
+    alignSelf: "stretch",
+    backgroundColor: "#080d18",
+    borderColor: "#1f2937",
+    borderRadius: 18,
     borderWidth: 1,
     padding: 14
   },
-  warningUrgent: {
-    backgroundColor: "#fff1f2",
-    borderColor: "#fb7185"
-  },
-  warningNormal: {
-    backgroundColor: "#fffbeb",
-    borderColor: "#f59e0b"
-  },
-  warningLabel: {
-    color: "#9f1239",
+  detailTitle: {
+    color: "#93a4b8",
     fontSize: 13,
-    fontWeight: "900",
-    textTransform: "uppercase"
-  },
-  warningMessage: {
-    color: "#111827",
-    fontSize: 20,
-    fontWeight: "800",
-    lineHeight: 27,
-    marginTop: 5
-  },
-  metaText: {
-    color: "#475569",
-    fontSize: 15,
-    lineHeight: 22,
-    marginTop: 8
+    fontWeight: "800"
   },
   stepRow: {
     alignItems: "flex-start",
-    borderTopColor: "#e5e7eb",
+    borderTopColor: "#1f2937",
     borderTopWidth: 1,
     flexDirection: "row",
     gap: 10,
     paddingVertical: 10
   },
   stepRowActive: {
-    backgroundColor: "#ecfdf5"
+    backgroundColor: "#102545"
   },
   stepNumber: {
     color: "#64748b",
@@ -702,22 +994,22 @@ const styles = StyleSheet.create({
     textAlign: "center"
   },
   stepNumberActive: {
-    color: "#047857"
+    color: "#60a5fa"
   },
   stepText: {
-    color: "#334155",
+    color: "#cbd5e1",
     flex: 1,
     fontSize: 15,
     lineHeight: 21
   },
   stepTextActive: {
-    color: "#064e3b",
+    color: "#ffffff",
     fontWeight: "800"
   },
   logText: {
-    borderTopColor: "#edf2f7",
+    borderTopColor: "#1f2937",
     borderTopWidth: 1,
-    color: "#475569",
+    color: "#94a3b8",
     fontSize: 13,
     lineHeight: 19,
     paddingVertical: 7

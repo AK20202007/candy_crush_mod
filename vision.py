@@ -26,7 +26,7 @@ from ultralytics import YOLO
 try:
     from CoreMotion import CMAltimeter, CMMotionManager
     from Foundation import NSOperationQueue
-    HAS_CORE_MOTION = True
+    HAS_CORE_MOTION = os.environ.get("DISABLE_CORE_MOTION", "").lower() not in {"1", "true", "yes"}
 except ImportError:
     HAS_CORE_MOTION = False
 

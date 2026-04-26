@@ -9,7 +9,7 @@ DOOR_PARTS_MODEL_PATH="${DOOR_PARTS_MODEL_PATH:-/tmp/joechencc_door_detection_re
 DOOR_PARTS_YOLOV5_DIR="${DOOR_PARTS_YOLOV5_DIR:-/tmp/joechencc_door_detection_review/yolov5}"
 
 cd "$ROOT_DIR"
-MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/matplotlib}" "$PYTHON_BIN" -u -B cloudflare_vision_api.py \
+DISABLE_CORE_MOTION="${DISABLE_CORE_MOTION:-1}" MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/matplotlib}" "$PYTHON_BIN" -u -B cloudflare_vision_api.py \
   --host "$HOST" \
   --port "$PORT" \
   --door-parts-model "$DOOR_PARTS_MODEL_PATH" \
