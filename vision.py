@@ -316,7 +316,7 @@ class VisionSystem:
 
     def __init__(
         self,
-        on_decision: Callable[[AgentDecision], None],
+        on_decision: Optional[Callable[[AgentDecision], None]] = None,
         config: Optional[VisionConfig] = None,
         router: Optional[AgenticNavigationRouter] = None,
         route_provider: Optional[Callable[[], RouteState]] = None,
@@ -397,7 +397,8 @@ class VisionSystem:
                     
                     if decision.should_speak and decision.message:
                         self._last_spoken = decision.message
-                        self._on_decision(decision)
+                        if self._on_decision is not None:
+                            self._on_decision(decision)
 
                     frame_count += 1
                     fps_frames += 1
