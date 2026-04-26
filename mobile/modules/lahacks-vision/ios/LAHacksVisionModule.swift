@@ -1,5 +1,7 @@
 import AVFoundation
+import CoreImage
 import ExpoModulesCore
+import UIKit
 import Vision
 
 /// `AVCaptureVideoDataOutputSampleBufferDelegate` requires `NSObject`; Expo `Module` does not inherit it, so we use a helper.
@@ -27,6 +29,11 @@ public final class LAHacksVisionModule: Module {
   private var personCenterRadius: CGFloat = 0.22
   private var warningCooldownS: Double = 2.5
   private var confirmFrames: Int = 2
+  private var navApiBaseUrl: URL?
+  private var cloudFrameIntervalS: Double = 0.75
+  private var cloudJpegQuality: CGFloat = 0.55
+  private var cloudRequestInFlight = false
+  private let ciContext = CIContext()
 
   public func definition() -> ModuleDefinition {
     Name("LAHacksVision")
@@ -68,6 +75,22 @@ public final class LAHacksVisionModule: Module {
     }
     if let value = config["confirmFrames"] as? Int {
       confirmFrames = max(1, min(8, value))
+    }
+    if let value = config["navApiBaseUrl"] as? String {
+      let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+      if let url = URL(string: trimmed), ["http", "https"].contains(url.scheme?.lowercased() ?? "") {
+        navApiBaseUrl = url
+      } else {
+        navApiBaseUrl = nil
+      }
+    } else {
+      navApiBaseUrl = nil
+    }
+    if let value = config["cloudFrameIntervalS"] as? Double {
+      cloudFrameIntervalS = max(0.25, min(5.0, value))
+    }
+    if let value = config["cloudJpegQuality"] as? Double {
+      cloudJpegQuality = CGFloat(max(0.2, min(0.9, value)))
     }
   }
 
@@ -132,6 +155,12 @@ public final class LAHacksVisionModule: Module {
 
   fileprivate func handleVideoSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
     let now = CACurrentMediaTime()
+
+    if let navApiBaseUrl {
+      handleCloudVideoSampleBuffer(sampleBuffer, baseUrl: navApiBaseUrl, now: now)
+      return
+    }
+
     if now - lastInferenceAt < 0.16 {
       return
     }
@@ -187,5 +216,119 @@ public final class LAHacksVisionModule: Module {
     request.upperBodyOnly = false
     let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
     try? handler.perform([request])
+  }
+
+  private func handleCloudVideoSampleBuffer(_ sampleBuffer: CMSampleBuffer, baseUrl: URL, now: TimeInterval) {
+    if cloudRequestInFlight || now - lastInferenceAt < cloudFrameIntervalS {
+      return
+    }
+    lastInferenceAt = now
+    cloudRequestInFlight = true
+
+    guard let imageBase64 = jpegBase64(from: sampleBuffer) else {
+      cloudRequestInFlight = false
+      return
+    }
+
+    var request = URLRequest(url: baseUrl.appendingPathComponent("api/vision/frame"))
+    request.httpMethod = "POST"
+    request.timeoutInterval = 8
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+    let payload: [String: Any] = [
+      "image_base64": imageBase64,
+      "indoor_start": "yes",
+      "scene": [
+        "location_type": "room"
+      ],
+      "motion": [
+        "is_moving": false,
+        "speed_mps": 0
+      ],
+      "route": [
+        "active": true,
+        "exit_seeking": true,
+        "mapping_state": "mapping",
+        "next_instruction": "Leave the room first. Stand still, turn 360 degrees slowly, and scan for a door or exit sign."
+      ]
+    ]
+
+    do {
+      request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+    } catch {
+      cloudRequestInFlight = false
+      return
+    }
+
+    URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+      guard let self else {
+        return
+      }
+      defer {
+        self.cloudRequestInFlight = false
+      }
+
+      guard error == nil else {
+        return
+      }
+      guard
+        let httpResponse = response as? HTTPURLResponse,
+        (200..<300).contains(httpResponse.statusCode),
+        let data
+      else {
+        return
+      }
+      if let eventPayload = self.warningEventPayload(from: data) {
+        self.emitCloudWarning(eventPayload)
+      }
+    }.resume()
+  }
+
+  private func jpegBase64(from sampleBuffer: CMSampleBuffer) -> String? {
+    guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
+      return nil
+    }
+    let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+    guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+      return nil
+    }
+    guard let jpegData = UIImage(cgImage: cgImage).jpegData(compressionQuality: cloudJpegQuality) else {
+      return nil
+    }
+    return jpegData.base64EncodedString()
+  }
+
+  private func warningEventPayload(from data: Data) -> [String: Any]? {
+    guard
+      let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let decision = root["decision"] as? [String: Any],
+      (decision["should_speak"] as? Bool) ?? true,
+      let rawMessage = decision["message"] as? String
+    else {
+      return nil
+    }
+
+    let message = rawMessage.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !message.isEmpty else {
+      return nil
+    }
+
+    let priority = (decision["priority"] as? NSNumber)?.intValue ?? 50
+    return [
+      "message": message,
+      "level": priority >= 80 ? "urgent" : "normal",
+      "ts": Date().timeIntervalSince1970 * 1000
+    ]
+  }
+
+  private func emitCloudWarning(_ payload: [String: Any]) {
+    let now = CACurrentMediaTime()
+    if now - lastWarningAt < warningCooldownS {
+      return
+    }
+    lastWarningAt = now
+    DispatchQueue.main.async {
+      self.sendEvent("visionWarning", payload)
+    }
   }
 }

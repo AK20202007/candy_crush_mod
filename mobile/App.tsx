@@ -13,6 +13,7 @@ import {
   View
 } from "react-native";
 
+import { formatNavApiStatus, getNavApiBaseUrl } from "./src/cloudflareConfig";
 import { fetchGoogleWalkingSteps } from "./src/maps/googleDirections";
 import { haversineMeters, progressNavigation } from "./src/navigationEngine";
 import type { HazardWarning, LatLng, RouteStep } from "./src/types";
@@ -55,6 +56,8 @@ function formatTime(): string {
 
 export default function App(): React.JSX.Element {
   const googleMapsApiKey = useMemo(getGoogleMapsApiKey, []);
+  const navApiBaseUrl = useMemo(getNavApiBaseUrl, []);
+  const navApiStatus = useMemo(() => formatNavApiStatus(navApiBaseUrl), [navApiBaseUrl]);
 
   const [destination, setDestination] = useState("");
   const [phase, setPhase] = useState<Phase>("idle");
@@ -216,14 +219,14 @@ export default function App(): React.JSX.Element {
     }
     try {
       setVisionState("starting");
-      await startVision({ confirmFrames: 2, warningCooldownS: 2.5 });
+      await startVision({ confirmFrames: 2, warningCooldownS: 2.5, navApiBaseUrl: navApiBaseUrl || undefined });
       setVisionState("on");
-      addLog("Obstacle detection started");
+      addLog(navApiBaseUrl ? `Obstacle detection started; cloud API ${navApiBaseUrl}` : "Obstacle detection started");
     } catch (error) {
       setVisionState("error");
       addLog(`Vision failed: ${error instanceof Error ? error.message : String(error)}`);
     }
-  }, [addLog]);
+  }, [addLog, navApiBaseUrl]);
 
   const loadRoute = useCallback(async () => {
     if (isBusy) {
@@ -339,6 +342,7 @@ export default function App(): React.JSX.Element {
         <View style={styles.statusRow}>
           <StatusPill label={phase} tone={phase === "error" ? "danger" : isNavigating ? "active" : "neutral"} />
           <StatusPill label={`vision ${visionState}`} tone={visionState === "on" ? "active" : visionState === "error" ? "danger" : "neutral"} />
+          <StatusPill label={navApiStatus} tone={navApiBaseUrl ? "active" : "neutral"} />
         </View>
       </View>
 
@@ -390,6 +394,11 @@ export default function App(): React.JSX.Element {
           <Text style={styles.metaText}>
             {currentLocation ? `${currentLocation.lat.toFixed(6)}, ${currentLocation.lon.toFixed(6)}` : "Waiting for GPS"}
           </Text>
+        </View>
+
+        <View style={styles.panel}>
+          <Text style={styles.sectionTitle}>Cloudflare API</Text>
+          <Text style={styles.metaText}>{navApiBaseUrl || "Not configured"}</Text>
         </View>
 
         {routeSteps.length > 0 ? (

@@ -61,6 +61,22 @@ npx expo prebuild --clean
 npx expo run:ios
 ```
 
+## Cloudflare vision API
+
+The same app UI can use the local Python door-handle detector through a
+Cloudflare Tunnel. Start the local API and tunnel from the repo root, then launch
+the mobile app with the generated URL:
+
+```bash
+bash scripts/run_cloudflare_vision_api.sh
+bash scripts/run_trycloudflare_tunnel.sh
+EXPO_PUBLIC_NAV_API_BASE_URL="https://YOUR-SUBDOMAIN.trycloudflare.com" bash scripts/run_mobile_with_cloudflare_api.sh
+```
+
+With `EXPO_PUBLIC_NAV_API_BASE_URL` set, `LAHacksVision` posts camera frames to
+`/api/vision/frame` and emits the returned `decision.message` as the existing
+`visionWarning` event. Without that value, it uses the local iOS Vision fallback.
+
 ## Notes
 
 - This does not delete or replace the current Python prototype; it is the mobile migration track.
