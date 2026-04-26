@@ -21,7 +21,13 @@ import urllib.request
 from typing import Any, Dict, List, Tuple
 from urllib.parse import quote
 
-from navigation import RouteStep
+from dataclasses import dataclass
+
+@dataclass
+class RouteStep:
+    instruction: str
+    end_lat: float
+    end_lon: float
 
 ORS_GEOCODE = "https://api.openrouteservice.org/geocode/search"
 ORS_DIRECTIONS = "https://api.openrouteservice.org/v2/directions/foot-walking/json"

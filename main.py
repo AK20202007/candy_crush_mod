@@ -160,7 +160,7 @@ class NavigationApp:
             
             self.vision = VisionSystem(
                 config=vision_config,
-                on_decision=handle_decision,
+                on_frame_decision=handle_decision,
                 route_provider=lambda: self.route_state,
             )
             
@@ -215,16 +215,18 @@ class NavigationApp:
                 time.sleep(4)
             self.interface.speech.clear_queues()
 
+        time.sleep(0.5)
         recognizer = sr.Recognizer()
-        recognizer.energy_threshold = 300
+        recognizer.energy_threshold = 150
         recognizer.dynamic_energy_threshold = True
+        recognizer.pause_threshold = 1.0
 
         print(f"\n[system] 🎤 Listening... (speak now)")
 
         try:
             with sr.Microphone() as source:
-                recognizer.adjust_for_ambient_noise(source, duration=0.2)
-                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=5)
+                recognizer.adjust_for_ambient_noise(source, duration=0.5)
+                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=10)
                 wav_data = audio.get_wav_data()
         except Exception as e:
             print(f"[system] Microphone error: {e}")
