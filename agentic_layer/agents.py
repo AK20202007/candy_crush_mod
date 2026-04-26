@@ -54,6 +54,7 @@ STOP_HAZARDS = {
     "car",
     "bus",
     "truck",
+    "person",
 }
 
 TARGET_KEYWORDS = {

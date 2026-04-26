@@ -27,23 +27,49 @@ def bbox_area_ratio(bbox: BBox, frame_width: float, frame_height: float) -> floa
     return (bbox.width * bbox.height) / area
 
 
-def distance_inches_to_meters(distance_inches: Optional[float]) -> Optional[float]:
-    if distance_inches is None:
-        return None
-    return max(0.0, float(distance_inches) * 0.0254)
+# Estimated real-world widths in meters for common objects.
+REAL_WORLD_WIDTHS_M = {
+    "person": 0.45,
+    "car": 1.8,
+    "chair": 0.5,
+    "dining table": 1.2,
+    "couch": 2.0,
+    "bench": 1.5,
+    "bus": 2.5,
+    "truck": 2.5,
+    "bicycle": 0.6,
+    "motorcycle": 0.8,
+    "door": 0.9,
+    "stairs": 1.2,
+    "traffic cone": 0.3,
+    "fire hydrant": 0.3,
+    "stop sign": 0.75,
+}
 
-
-def estimate_distance_inches_from_bbox(bbox: BBox, distance_scale: float = 1.0) -> float:
+def estimate_distance_m_from_bbox(
+    bbox: BBox, 
+    label: str, 
+    frame_width: float, 
+    distance_scale: float = 1.0
+) -> float:
     """
-    Monocular distance heuristic adapted from paul-pias/Object-Detection-and-Distance-Measurement.
-
-    This is not true depth. Treat it as a rough ranking signal until calibrated with
-    a known phone camera, object class, and real-world measurements.
+    Estimate real-world distance in meters using focal length and known widths.
+    Assumes a standard ~70 degree horizontal FOV (focal length ~450px for 640px width).
     """
-    width = max(1.0, bbox.width)
-    height = max(1.0, bbox.height)
-    raw_inches = ((2 * math.pi * 180.0) / (width + height * 360.0)) * 1000.0 + 3.0
-    return max(1.0, raw_inches * max(0.01, distance_scale))
+    # 1. Use label-specific width if available, else default to 0.5m
+    real_width_m = REAL_WORLD_WIDTHS_M.get(label.lower(), 0.5)
+    
+    # 2. Approximate focal length in pixels (assuming 70deg HFOV)
+    # focal_length = (width / 2) / tan(hfov / 2)
+    # For 640px, focal_length is approx 450.
+    focal_length_px = (frame_width / 2.0) / 0.7  # tan(35deg) is ~0.7
+    
+    # 3. Calculate distance: d = (W * f) / w
+    bbox_width_px = max(1.0, bbox.width)
+    distance_m = (real_width_m * focal_length_px) / bbox_width_px
+    
+    # 4. Apply calibration scale
+    return max(0.1, distance_m * max(0.01, distance_scale))
 
 
 def detection_from_bbox(
@@ -59,35 +85,18 @@ def detection_from_bbox(
     source: str = "yolov8-distance",
 ) -> Detection:
     bbox = BBox(x1=x1, y1=y1, x2=x2, y2=y2)
-    distance_inches = estimate_distance_inches_from_bbox(bbox, distance_scale=distance_scale)
-    edge_margin_x = max(2.0, frame_width * 0.015)
-    edge_margin_y = max(2.0, frame_height * 0.015)
-    edge_contact = []
-    if bbox.x1 <= edge_margin_x:
-        edge_contact.append("left")
-    if bbox.x2 >= frame_width - edge_margin_x:
-        edge_contact.append("right")
-    if bbox.y1 <= edge_margin_y:
-        edge_contact.append("top")
-    if bbox.y2 >= frame_height - edge_margin_y:
-        edge_contact.append("bottom")
-    edge_truncated = bool(edge_contact)
-    attributes = {
-        "area_ratio": bbox_area_ratio(bbox, frame_width, frame_height),
-        "center_x_ratio": bbox.center_x / max(1.0, frame_width),
-        "center_y_ratio": bbox.center_y / max(1.0, frame_height),
-        "distance_inches_heuristic": distance_inches,
-        "edge_truncated": edge_truncated,
-        "edge_contact": edge_contact,
-        "partial_visibility": "frame_edge" if edge_truncated else "full",
-        "distance_reliability": "low" if edge_truncated else "medium",
-    }
+    distance_m = estimate_distance_m_from_bbox(bbox, label, frame_width, distance_scale)
+    
     return Detection(
         label=label,
         confidence=confidence,
         bbox=bbox,
         direction=direction_from_bbox(bbox, frame_width),
-        distance_m=distance_inches_to_meters(distance_inches),
+        distance_m=distance_m,
         source=source,
-        attributes=attributes,
+        attributes={
+            "area_ratio": bbox_area_ratio(bbox, frame_width, frame_height),
+            "center_x_ratio": bbox.center_x / max(1.0, frame_width),
+            "center_y_ratio": bbox.center_y / max(1.0, frame_height),
+        },
     )
