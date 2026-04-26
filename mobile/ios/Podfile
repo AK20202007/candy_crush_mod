@@ -67,6 +67,16 @@ target 'LAHacksNav' do
         end
       end
     end
+
+    # expo-constants can generate an unquoted PROJECT_ROOT assignment when this
+    # repo lives in a path with spaces. Let its script resolve PROJECT_ROOT
+    # internally so Xcode does not split "/Users/.../New project 2/...".
+    ex_constants_target = installer.pods_project.targets.find { |target| target.name == 'EXConstants' }
+    ex_constants_target&.shell_script_build_phases&.each do |phase|
+      next unless phase.name == '[CP-User] Generate app.config for prebuilt Constants.manifest'
+
+      phase.shell_script = 'bash -l -c "\"$PODS_TARGET_SRCROOT/../scripts/get-app-config-ios.sh\""'
+    end
   end
 
   post_integrate do |installer|
