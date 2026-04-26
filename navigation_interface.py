@@ -55,7 +55,6 @@ class NavigationInterface:
     def start(self) -> None:
         """Initialize and start all components."""
         self.speech.start()
-        self.speak_info("Navigation system ready. Say 'navigate' followed by your destination to begin.")
         print("[interface] Navigation interface started")
     
     def stop(self) -> None:

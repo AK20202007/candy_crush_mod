@@ -104,6 +104,7 @@ class ElevenLabsSpeechController:
         # Statistics
         self._messages_spoken = 0
         self._messages_suppressed = 0
+        self.is_playing = False
         self._api_calls = 0
         self._api_errors = 0
         
@@ -349,6 +350,7 @@ class ElevenLabsSpeechController:
             if not message.strip():
                 continue
             
+            self.is_playing = True
             # Try ElevenLabs first, then fallback
             success = False
             if self.api_key:
@@ -356,6 +358,8 @@ class ElevenLabsSpeechController:
             
             if not success and self.fallback_to_system:
                 success = self._speak_with_fallback(message)
+            
+            self.is_playing = False
             
             if success:
                 self._messages_spoken += 1
@@ -450,6 +454,11 @@ class ElevenLabsSpeechController:
             print(f"[elevenlabs] STT error: {e}")
             return None
     
+    def is_idle(self) -> bool:
+        """Return True if no audio is playing and all queues are empty."""
+        has_items = any(q.qsize() > 0 for q in [self._critical_queue, self._urgent_queue, self._normal_queue, self._info_queue])
+        return not has_items and not getattr(self, 'is_playing', False)
+
     def get_statistics(self) -> dict:
         """Get speech controller statistics."""
         return {

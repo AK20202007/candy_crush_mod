@@ -269,6 +269,7 @@ class RouteState(Serializable):
     next_turn_distance_m: Optional[float] = None
     off_route: bool = False
     exit_seeking: bool = False
+    mapping_state: str = "done"
 
     @classmethod
     def from_dict(cls, data: Optional[Dict[str, Any]]) -> "RouteState":
@@ -280,6 +281,7 @@ class RouteState(Serializable):
             next_turn_distance_m=data.get("next_turn_distance_m"),
             off_route=bool(data.get("off_route", False)),
             exit_seeking=bool(data.get("exit_seeking", False)),
+            mapping_state=str(data.get("mapping_state", "done")),
         )
 
 

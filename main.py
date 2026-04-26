@@ -26,6 +26,10 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+import urllib3
+
+# Suppress unverified HTTPS warnings caused by the macOS SSL workaround
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Load .env file if it exists (API keys)
 _env_path = Path(__file__).parent / ".env"
@@ -40,6 +44,7 @@ if _env_path.exists():
 # Import our improved components
 from agentic_layer import AgenticNavigationRouter
 from agentic_layer.config import DEFAULT_PROFILE_NAME, load_profiles
+from agentic_layer.models import RouteState
 from navigation_interface import NavigationInterface
 from speech_controller import IntelligentSpeechController
 from user_interface import UserMode, UserPreferences
@@ -64,6 +69,7 @@ class NavigationApp:
         self.vision: Optional[VisionSystem] = None
         self.stop_event = threading.Event()
         self.is_running = False
+        self.route_state = RouteState(active=False)
         
         # Status tracking
         self._start_time: Optional[float] = None
@@ -162,6 +168,7 @@ class NavigationApp:
             self.vision = VisionSystem(
                 config=vision_config,
                 on_decision=handle_decision,
+                route_provider=lambda: self.route_state,
             )
             
             # Start hardware sensor listeners if available
@@ -207,7 +214,12 @@ class NavigationApp:
         # Speak the prompt
         if self.interface:
             self.interface.speak_info(prompt)
-            time.sleep(4)  # Wait for TTS to finish fully
+            timeout = time.time() + 15.0
+            if hasattr(self.interface.speech, 'is_idle'):
+                while not self.interface.speech.is_idle() and time.time() < timeout:
+                    time.sleep(0.1)
+            else:
+                time.sleep(4)
             self.interface.speech.clear_queues()
 
         recognizer = sr.Recognizer()
@@ -256,7 +268,7 @@ class NavigationApp:
             return args.destination
 
         # No CLI destination — ask via voice
-        result = self._listen_for_destination("Where would you like to go?")
+        result = self._listen_for_destination("Please give a destination.")
         if result:
             return result
 
@@ -268,7 +280,7 @@ class NavigationApp:
         except EOFError:
             return None
 
-    def verify_destination(self, raw_destination: str) -> Optional[dict]:
+    def verify_destination(self, raw_destination: str, lat: Optional[float] = None, lng: Optional[float] = None) -> Optional[dict]:
         """
         Look up the destination on Google Maps, announce it via audio,
         listen for spoken yes/no confirmation.
@@ -282,7 +294,7 @@ class NavigationApp:
         """
         print(f"[system] Looking up '{raw_destination}' on Google Maps...")
 
-        result = search_destination(raw_destination)
+        result = search_destination(raw_destination, lat=lat, lng=lng)
         if not result:
             msg = f"Sorry, I could not find {raw_destination}. Please try again."
             print(f"[system] {msg}")
@@ -292,17 +304,17 @@ class NavigationApp:
             return None
 
         # Build and speak confirmation message
-        confirm_msg = format_confirmation_message(result)
+        confirm_msg = f"Navigating to {result['name']}. Is this correct?"
         print(f"[system] {confirm_msg}")
+
         if self.interface:
             self.interface.speak_info(confirm_msg)
-            time.sleep(8)  # Wait for full TTS playback
-            self.interface.speech.clear_queues()
-
-        # Speak the prompt
-        if self.interface:
-            self.interface.speak_info("Please say yes to confirm or no to try again.")
-            time.sleep(4)  # Wait for TTS to finish fully
+            timeout = time.time() + 15.0
+            if hasattr(self.interface.speech, 'is_idle'):
+                while not self.interface.speech.is_idle() and time.time() < timeout:
+                    time.sleep(0.1)
+            else:
+                time.sleep(4)
             self.interface.speech.clear_queues()
 
         # Listen for yes/no using the robust sounddevice verifier
@@ -335,6 +347,19 @@ class NavigationApp:
 
         try:
             while not self.stop_event.is_set():
+                # Try to fetch GPS location to bias the search (5 mile radius)
+                current_lat = None
+                current_lng = None
+                if not args.destination:
+                    try:
+                        import location_service
+                        loc = location_service.get_current_location(timeout_s=5.0)
+                        current_lat = loc.latitude
+                        current_lng = loc.longitude
+                        print(f"[system] GPS bias acquired: {current_lat}, {current_lng}")
+                    except Exception as e:
+                        print(f"[system] Could not fetch GPS location for search bias: {e}")
+
                 # Get raw destination input (voice or CLI)
                 raw_destination = self.get_destination(args)
 
@@ -345,10 +370,10 @@ class NavigationApp:
                 # Keep asking until user verbally confirms
                 destination_data = None
                 while destination_data is None and not self.stop_event.is_set():
-                    destination_data = self.verify_destination(raw_destination)
+                    destination_data = self.verify_destination(raw_destination, lat=current_lat, lng=current_lng)
                     if destination_data is None:
                         # Ask for a new destination
-                        raw_destination = self._listen_for_destination("Where would you like to go?")
+                        raw_destination = self._listen_for_destination("Please give a destination.")
                         if raw_destination is None:
                             # Voice failed — text fallback
                             print("\n[system] Enter destination (or 'quit' to exit):")
@@ -375,6 +400,12 @@ class NavigationApp:
                 print(f"[system]   Coords  : lat={destination_lat}, lng={destination_lng}")
 
                 self.interface.set_destination(destination_name)
+
+                # Initialize route state and trigger vision mapping
+                self.route_state.active = True
+                self.route_state.destination = destination_name
+                self.route_state.mapping_state = "pending"
+                self.route_state.next_instruction = f"Head toward {destination_name}."
 
                 # NOW start vision + obstacle detection
                 print("[system] Starting vision system...")

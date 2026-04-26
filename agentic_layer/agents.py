@@ -873,6 +873,67 @@ def _indoor_obstacle_instruction(nearest: Detection, blocking: List[Detection], 
     return f"{label.capitalize()} ahead {direction}, {distance}. {avoidance}"
 
 
+class EnvironmentMappingAgent(BaseAgent):
+    """Handles the initial 360-degree environment mapping to determine indoor vs. outdoor."""
+
+    name = "environment_mapping"
+    _start_time_ms: int = 0
+    _indoor_votes: int = 0
+    _outdoor_votes: int = 0
+
+    def handle(self, ctx: FrameContext) -> Optional[AgentDecision]:
+        if not ctx.route.active or getattr(ctx.route, "mapping_state", "done") == "done":
+            return None
+
+        state = getattr(ctx.route, "mapping_state", "pending")
+        
+        if state == "pending":
+            self._start_time_ms = ctx.timestamp_ms
+            self._indoor_votes = 0
+            self._outdoor_votes = 0
+            ctx.route.mapping_state = "mapping"
+            return AgentDecision(
+                action=AgentAction.GUIDE,
+                priority=90,
+                message="Please turn 360 degrees slowly so I can map your surroundings.",
+                haptic=HapticPattern.NONE,
+                agents_consulted=[self.name],
+                debug={"reason": "mapping-started"}
+            )
+            
+        if state == "mapping":
+            if ctx.scene.is_indoor:
+                self._indoor_votes += 1
+            elif ctx.scene.is_outdoor:
+                self._outdoor_votes += 1
+                
+            elapsed = ctx.timestamp_ms - self._start_time_ms
+            if elapsed > 10000:  # 10 seconds to turn
+                ctx.route.mapping_state = "done"
+                if self._indoor_votes >= self._outdoor_votes:
+                    ctx.route.exit_seeking = True
+                    return AgentDecision(
+                        action=AgentAction.GUIDE,
+                        priority=90,
+                        message="Mapping complete. You appear to be indoors. I will guide you to an exit first.",
+                        haptic=HapticPattern.CAUTION,
+                        agents_consulted=[self.name],
+                        debug={"reason": "mapping-done-indoors"}
+                    )
+                else:
+                    ctx.route.exit_seeking = False
+                    return AgentDecision(
+                        action=AgentAction.GUIDE,
+                        priority=90,
+                        message="Mapping complete. You are outdoors. Initializing route.",
+                        haptic=HapticPattern.SUCCESS,
+                        agents_consulted=[self.name],
+                        debug={"reason": "mapping-done-outdoors"}
+                    )
+                    
+        return None
+
+
 class ExitSeekingAgent(BaseAgent):
     """Guides the user to find a door/exit when leaving a building.
 
@@ -890,6 +951,21 @@ class ExitSeekingAgent(BaseAgent):
         # Only engage when route metadata signals exit-seeking phase.
         if not getattr(ctx.route, "exit_seeking", False):
             return None
+            
+        # If the visual scene classifier detects we are outdoors, we have successfully exited!
+        if ctx.scene.is_outdoor:
+            ctx.route.exit_seeking = False
+            if ctx.route.destination:
+                ctx.route.next_instruction = f"Head toward {ctx.route.destination}."
+            return AgentDecision(
+                action=AgentAction.GUIDE,
+                priority=75,
+                message="You have exited the building. Switching to outdoor navigation.",
+                haptic=HapticPattern.SUCCESS,
+                agents_consulted=[self.name],
+                debug={"reason": "transitioned-outdoors"}
+            )
+
         if not ctx.scene.is_indoor:
             return None
 
@@ -934,7 +1010,7 @@ class ExitSeekingAgent(BaseAgent):
             return AgentDecision(
                 action=AgentAction.ASK,
                 priority=65,
-                message="Looking for an exit. Slowly turn right and scan for a door or exit sign.",
+                message="Looking for an exit. Slowly turn another 360 degrees and scan for a door or exit sign.",
                 haptic=HapticPattern.CAUTION,
                 agents_consulted=[self.name],
                 debug={"reason": "exit-scanning"},
