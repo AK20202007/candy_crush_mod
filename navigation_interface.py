@@ -16,6 +16,31 @@ from elevenlabs_speech import ElevenLabsSpeechController, create_elevenlabs_cont
 from speech_controller import AlertType, IntelligentSpeechController
 from user_interface import SystemState, UserInterface, UserMode, UserPreferences
 
+WALKING_STEP_M = 0.75
+
+
+def _walking_steps_phrase(distance_m: Optional[float]) -> str:
+    if distance_m is None:
+        return ""
+    steps = max(1, int(round(distance_m / WALKING_STEP_M)))
+    unit = "step" if steps == 1 else "steps"
+    return f"in about {steps} {unit}"
+
+
+def _route_message(route) -> str:
+    instruction = route.next_instruction or "Continue toward your destination"
+    distance = ""
+    if route.next_turn_distance_m is not None:
+        distance = f" {_walking_steps_phrase(route.next_turn_distance_m)}"
+    message = f"{instruction}{distance}."
+    if getattr(route, "exit_seeking", False) and getattr(route, "pending_outdoor_instruction", None):
+        outdoor_distance = ""
+        pending_distance = getattr(route, "pending_outdoor_distance_m", None)
+        if pending_distance is not None:
+            outdoor_distance = f" {_walking_steps_phrase(pending_distance)}"
+        message += f" After you are outside, first outdoor direction: {route.pending_outdoor_instruction}{outdoor_distance}."
+    return message
+
 
 class NavigationInterface:
     """
@@ -31,17 +56,23 @@ class NavigationInterface:
     def __init__(
         self,
         router: AgenticNavigationRouter,
-        preferences: Optional[UserPreferences] = None
+        preferences: Optional[UserPreferences] = None,
+        speech_engine: str = "system",
     ):
         self.router = router
         self.ui = UserInterface(preferences)
-        self.speech = ElevenLabsSpeechController(user_interface=self.ui)
+        self.speech_engine = speech_engine
+        if speech_engine == "elevenlabs":
+            self.speech = ElevenLabsSpeechController(user_interface=self.ui)
+        else:
+            self.speech = IntelligentSpeechController(user_interface=self.ui)
         
         # State tracking
         self._last_decision: Optional[AgentDecision] = None
         self._last_decision_time_ms: int = 0
         self._consecutive_same_decisions: int = 0
         self._last_spoken_message: Optional[str] = None
+        self._last_route_prompt_ms: int = 0
         
         # Context history
         self._recent_detections: List[str] = []
@@ -79,9 +110,12 @@ class NavigationInterface:
         # Update UI state from context
         self._update_state_from_context(ctx)
         
-        # Determine if we should speak this decision
+        # Safety decisions get first chance. If the current decision is silent
+        # or low-value, route heartbeat below can still provide directions.
         if not self._should_provide_feedback(decision, now_ms):
-            return False
+            if decision.action == AgentAction.WARN or decision.priority >= 80:
+                return False
+            return self._maybe_speak_route_heartbeat(ctx, now_ms)
         
         # Classify and handle the decision
         alert_type, priority = self._classify_decision(decision)
@@ -108,7 +142,40 @@ class NavigationInterface:
             else:
                 self._consecutive_same_decisions = 0
         
+        if success and self._is_route_guidance(decision, ctx):
+            self._last_route_prompt_ms = now_ms
+
+        if success:
+            return True
+        return self._maybe_speak_route_heartbeat(ctx, now_ms)
+
+    def _maybe_speak_route_heartbeat(self, ctx: FrameContext, now_ms: int) -> bool:
+        """Speak route guidance on a steady cadence when no warning is active."""
+        route = ctx.route
+        if not route or not route.active or not route.next_instruction:
+            return False
+
+        interval_ms = int(max(3.0, self.ui.preferences.navigation_prompt_interval_s) * 1000)
+        if now_ms - self._last_route_prompt_ms < interval_ms:
+            return False
+
+        message = _route_message(route)
+        success = self.speech.speak_guidance(message, force=True)
+        if success:
+            self._last_route_prompt_ms = now_ms
+            self._last_spoken_message = message
+            self._last_decision_time_ms = now_ms
         return success
+
+    @staticmethod
+    def _is_route_guidance(decision: AgentDecision, ctx: FrameContext) -> bool:
+        if not ctx.route or not ctx.route.active or not ctx.route.next_instruction:
+            return False
+        if decision.action != AgentAction.GUIDE:
+            return False
+        if "wayfinding" in decision.agents_consulted:
+            return True
+        return decision.message.strip() == _route_message(ctx.route).strip()
     
     def _update_state_from_context(self, ctx: FrameContext) -> None:
         """Update UI state based on frame context."""
@@ -161,15 +228,24 @@ class NavigationInterface:
             
             # Different timing based on action type
             if decision.priority >= 95:
-                min_interval = 0     # No delay for critical/immediate warnings
+                min_interval = 1000  # Critical can repeat, but not every frame
             elif decision.action == AgentAction.WARN:
-                min_interval = 500   # 0.5 seconds for other warnings
+                min_interval = 2500
             elif decision.action == AgentAction.GUIDE:
-                min_interval = 2000  # 2 seconds for guidance (faster navigation)
+                min_interval = 6500
             else:
-                min_interval = 1500  # 1.5 seconds default
+                min_interval = 3000
             
             if time_since_last < min_interval:
+                return False
+
+        is_idle = getattr(self.speech, "is_idle", lambda: True)
+        if not is_idle():
+            # Do not stack ordinary narration while another message is playing.
+            # Urgent and critical warnings may still replace their priority lane.
+            if decision.priority < 80:
+                return False
+            if decision.action in {AgentAction.GUIDE, AgentAction.ASK, AgentAction.ORIENT} and decision.priority < 90:
                 return False
         
         return True
@@ -186,7 +262,9 @@ class NavigationInterface:
                 return (AlertType.WARNING, priority)
         
         elif action == AgentAction.GUIDE:
-            return (AlertType.GUIDANCE, priority)
+            if priority >= 90:
+                return (AlertType.WARNING, priority)
+            return (AlertType.GUIDANCE, min(priority, 69))
         
         elif action == AgentAction.ORIENT:
             return (AlertType.INFO, priority)
@@ -195,7 +273,9 @@ class NavigationInterface:
             return (AlertType.INFO, priority)
         
         elif action == AgentAction.ASK:
-            return (AlertType.GUIDANCE, priority)
+            if priority >= 90:
+                return (AlertType.WARNING, priority)
+            return (AlertType.GUIDANCE, min(priority, 69))
         
         elif action == AgentAction.ESCALATE:
             return (AlertType.CRITICAL, 100)
@@ -261,17 +341,17 @@ class NavigationInterface:
         """Speak a critical safety alert."""
         return self.speech.speak_critical(message)
     
-    def speak_warning(self, message: str) -> bool:
+    def speak_warning(self, message: str, force: bool = False) -> bool:
         """Speak a warning alert."""
-        return self.speech.speak_warning(message)
+        return self.speech.speak_warning(message, force=force)
     
-    def speak_guidance(self, message: str) -> bool:
+    def speak_guidance(self, message: str, force: bool = False) -> bool:
         """Speak navigation guidance."""
-        return self.speech.speak_guidance(message)
+        return self.speech.speak_guidance(message, force=force)
     
-    def speak_info(self, message: str) -> bool:
+    def speak_info(self, message: str, force: bool = False) -> bool:
         """Speak general information."""
-        return self.speech.speak_info(message)
+        return self.speech.speak_info(message, force=force)
     
     def get_status(self) -> Dict:
         """Get current system status."""

@@ -100,6 +100,8 @@ class ElevenLabsSpeechController:
         self._stop = threading.Event()
         self._pause = threading.Event()
         self._thread = threading.Thread(target=self._worker, name="ElevenLabsSpeechWorker", daemon=True)
+        self._queue_lock = threading.Lock()
+        self._interrupt_playback = threading.Event()
         
         # Statistics
         self._messages_spoken = 0
@@ -111,6 +113,7 @@ class ElevenLabsSpeechController:
         # Audio playback
         self._current_stream = None
         self._audio_buffer = io.BytesIO()
+        self._fallback_engine = None
         
     def _init_client(self) -> bool:
         """Initialize ElevenLabs client."""
@@ -183,16 +186,20 @@ class ElevenLabsSpeechController:
             self._messages_suppressed += 1
             return False
         
-        # For immediate speech, clear lower priority queues
-        if immediate or alert_type == AlertType.CRITICAL or priority >= 90:
-            self._drain_lower_priority_queues()
-            self._critical_queue.put(message)
-        elif alert_type == AlertType.WARNING or priority >= 70:
-            self._urgent_queue.put(message)
-        elif alert_type == AlertType.GUIDANCE:
-            self._normal_queue.put(message)
-        else:
-            self._info_queue.put(message)
+        with self._queue_lock:
+            # For immediate speech, clear stale speech and stop current audio if
+            # possible. Other lanes keep only the latest message, which prevents
+            # delayed voices from piling up during live video.
+            if immediate or alert_type == AlertType.CRITICAL or priority >= 90:
+                self.interrupt_current()
+                self._drain_all_queues()
+                self._critical_queue.put(message)
+            elif alert_type == AlertType.WARNING or priority >= 70:
+                self._replace_queue(self._urgent_queue, message)
+            elif alert_type == AlertType.GUIDANCE:
+                self._replace_queue(self._normal_queue, message)
+            else:
+                self._replace_queue(self._info_queue, message)
         
         return True
     
@@ -200,17 +207,17 @@ class ElevenLabsSpeechController:
         """Speak a critical safety alert."""
         return self.speak(message, AlertType.CRITICAL, priority=100, immediate=immediate)
     
-    def speak_warning(self, message: str, immediate: bool = False) -> bool:
+    def speak_warning(self, message: str, immediate: bool = False, force: bool = False) -> bool:
         """Speak a warning alert."""
-        return self.speak(message, AlertType.WARNING, priority=80, immediate=immediate)
+        return self.speak(message, AlertType.WARNING, priority=80, immediate=immediate, force=force)
     
-    def speak_guidance(self, message: str, immediate: bool = False) -> bool:
+    def speak_guidance(self, message: str, immediate: bool = False, force: bool = False) -> bool:
         """Speak navigation guidance."""
-        return self.speak(message, AlertType.GUIDANCE, priority=60, immediate=immediate)
+        return self.speak(message, AlertType.GUIDANCE, priority=60, immediate=immediate or force)
     
-    def speak_info(self, message: str, immediate: bool = False) -> bool:
+    def speak_info(self, message: str, immediate: bool = False, force: bool = False) -> bool:
         """Speak general information."""
-        return self.speak(message, AlertType.INFO, priority=30, immediate=immediate)
+        return self.speak(message, AlertType.INFO, priority=30, immediate=immediate or force)
     
     def _drain_lower_priority_queues(self) -> None:
         """Clear normal and info queues when critical alert arrives."""
@@ -219,6 +226,34 @@ class ElevenLabsSpeechController:
                 while True:
                     q.get_nowait()
             except queue.Empty:
+                pass
+
+    def _drain_all_queues(self) -> None:
+        """Clear all pending speech queues."""
+        for q in [self._critical_queue, self._urgent_queue, self._normal_queue, self._info_queue]:
+            try:
+                while True:
+                    q.get_nowait()
+            except queue.Empty:
+                pass
+
+    @staticmethod
+    def _replace_queue(q: queue.Queue[str], message: str) -> None:
+        """Keep only the newest message for a priority lane."""
+        try:
+            while True:
+                q.get_nowait()
+        except queue.Empty:
+            pass
+        q.put(message)
+
+    def interrupt_current(self) -> None:
+        """Request the current audio playback to stop."""
+        self._interrupt_playback.set()
+        if SOUND_AVAILABLE:
+            try:
+                sd.stop()
+            except Exception:
                 pass
     
     def _get_next_message(self) -> Optional[tuple[str, AlertType]]:
@@ -293,6 +328,7 @@ class ElevenLabsSpeechController:
         try:
             # Stop any existing playback
             sd.stop()
+            self._interrupt_playback.clear()
             
             # Load audio from bytes
             audio_buffer = io.BytesIO(audio_data)
@@ -307,7 +343,10 @@ class ElevenLabsSpeechController:
             # Wait for playback with timeout
             start_time = time.time()
             while sd.get_stream().active:
-                if time.time() - start_time > 10:  # 10 second timeout
+                if self._stop.is_set() or self._interrupt_playback.is_set():
+                    sd.stop()
+                    break
+                if time.time() - start_time > 8:  # 8 second timeout
                     sd.stop()
                     break
                 time.sleep(0.1)
@@ -324,9 +363,12 @@ class ElevenLabsSpeechController:
         """Fallback to system TTS (pyttsx3)."""
         try:
             import pyttsx3
-            engine = pyttsx3.init()
-            engine.say(message)
-            engine.runAndWait()
+            if self._fallback_engine is None:
+                self._fallback_engine = pyttsx3.init()
+                rate = self._fallback_engine.getProperty("rate")
+                self._fallback_engine.setProperty("rate", int(rate * self.ui.preferences.speech_rate))
+            self._fallback_engine.say(message)
+            self._fallback_engine.runAndWait()
             return True
         except Exception as e:
             print(f"[elevenlabs] Fallback TTS error: {e}")
@@ -343,6 +385,7 @@ class ElevenLabsSpeechController:
             
             result = self._get_next_message()
             if result is None:
+                time.sleep(0.02)
                 continue
             
             message, alert_type = result
@@ -478,13 +521,8 @@ class ElevenLabsSpeechController:
     
     def clear_queues(self) -> None:
         """Clear all speech queues."""
-        for q in [self._critical_queue, self._urgent_queue, self._normal_queue, self._info_queue]:
-            try:
-                while True:
-                    q.get_nowait()
-            except queue.Empty:
-                pass
-        print("[elevenlabs] Queues cleared")
+        with self._queue_lock:
+            self._drain_all_queues()
 
 
 def create_elevenlabs_controller(

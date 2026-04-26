@@ -13,6 +13,14 @@ elevenlabs>=1.0.0
 sounddevice>=0.4.6
 soundfile>=0.12.1
 requests>=2.31.0
+urllib3>=2.0.0
 elevenlabs
 sounddevice
 soundfile
+
+# Optional local YOLOv5 door-parts model support
+tqdm>=4.41.0
+pandas>=1.1.0
+seaborn>=0.11.0
+scipy>=1.4.1
+matplotlib>=3.2.2

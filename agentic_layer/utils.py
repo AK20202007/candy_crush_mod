@@ -60,6 +60,28 @@ def detection_from_bbox(
 ) -> Detection:
     bbox = BBox(x1=x1, y1=y1, x2=x2, y2=y2)
     distance_inches = estimate_distance_inches_from_bbox(bbox, distance_scale=distance_scale)
+    edge_margin_x = max(2.0, frame_width * 0.015)
+    edge_margin_y = max(2.0, frame_height * 0.015)
+    edge_contact = []
+    if bbox.x1 <= edge_margin_x:
+        edge_contact.append("left")
+    if bbox.x2 >= frame_width - edge_margin_x:
+        edge_contact.append("right")
+    if bbox.y1 <= edge_margin_y:
+        edge_contact.append("top")
+    if bbox.y2 >= frame_height - edge_margin_y:
+        edge_contact.append("bottom")
+    edge_truncated = bool(edge_contact)
+    attributes = {
+        "area_ratio": bbox_area_ratio(bbox, frame_width, frame_height),
+        "center_x_ratio": bbox.center_x / max(1.0, frame_width),
+        "center_y_ratio": bbox.center_y / max(1.0, frame_height),
+        "distance_inches_heuristic": distance_inches,
+        "edge_truncated": edge_truncated,
+        "edge_contact": edge_contact,
+        "partial_visibility": "frame_edge" if edge_truncated else "full",
+        "distance_reliability": "low" if edge_truncated else "medium",
+    }
     return Detection(
         label=label,
         confidence=confidence,
@@ -67,10 +89,5 @@ def detection_from_bbox(
         direction=direction_from_bbox(bbox, frame_width),
         distance_m=distance_inches_to_meters(distance_inches),
         source=source,
-        attributes={
-            "area_ratio": bbox_area_ratio(bbox, frame_width, frame_height),
-            "center_x_ratio": bbox.center_x / max(1.0, frame_width),
-            "center_y_ratio": bbox.center_y / max(1.0, frame_height),
-            "distance_inches_heuristic": distance_inches,
-        },
+        attributes=attributes,
     )

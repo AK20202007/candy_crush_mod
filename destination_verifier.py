@@ -17,6 +17,7 @@ import ssl
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Optional, Tuple
 from urllib.parse import quote
 
@@ -33,7 +34,17 @@ ORS_GEOCODE = "https://api.openrouteservice.org/geocode/search"
 
 
 def _get_google_key() -> Optional[str]:
-    return (os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip() or None
+    env_key = (os.environ.get("GOOGLE_MAPS_API_KEY") or "").strip()
+    if env_key:
+        return env_key
+
+    app_json = Path(__file__).parent / "mobile" / "app.json"
+    try:
+        data = json.loads(app_json.read_text())
+        key = str(((data.get("expo") or {}).get("extra") or {}).get("googleMapsApiKey") or "").strip()
+        return key or None
+    except Exception:
+        return None
 
 
 def _get_ors_key() -> Optional[str]:

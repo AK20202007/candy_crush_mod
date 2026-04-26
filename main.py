@@ -50,7 +50,8 @@ from speech_controller import IntelligentSpeechController
 from user_interface import UserMode, UserPreferences
 from vision import VisionConfig, VisionSystem
 
-from destination_verifier import search_destination, format_confirmation_message, get_voice_confirmation
+from destination_verifier import search_destination, format_confirmation_message, get_text_confirmation, get_voice_confirmation
+from laptop_route_session import LaptopRouteSession
 
 # Try to import optional components
 try:
@@ -70,6 +71,7 @@ class NavigationApp:
         self.stop_event = threading.Event()
         self.is_running = False
         self.route_state = RouteState(active=False)
+        self.route_session: Optional[LaptopRouteSession] = None
         
         # Status tracking
         self._start_time: Optional[float] = None
@@ -80,7 +82,7 @@ class NavigationApp:
         """Setup graceful shutdown handlers."""
         def signal_handler(signum, frame):
             print("\n[system] Shutdown signal received, stopping gracefully...")
-            self.stop()
+            self.stop_event.set()
         
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
@@ -138,30 +140,46 @@ class NavigationApp:
             print(f"[config] Verbosity: {prefs.verbosity}")
             print(f"[config] Sensitivity: {prefs.warning_sensitivity}")
             print(f"[config] Speech rate: {prefs.speech_rate}x")
+            print(f"[config] Speech engine: {args.speech_engine}")
             
             # Create router and interface
             router = AgenticNavigationRouter()
-            self.interface = NavigationInterface(router, prefs)
+            self.interface = NavigationInterface(router, prefs, speech_engine=args.speech_engine)
+            self.route_session = LaptopRouteSession(
+                self.route_state,
+                Path(__file__).parent,
+                arrival_radius_m=args.arrival_radius_m,
+                poll_seconds=args.route_poll_seconds,
+                on_instruction=self._speak_route_instruction,
+            )
             
             # Setup vision system
             vision_config = VisionConfig(
-                imgsz=args.imgsz or 640,
+                imgsz=args.imgsz or 416,
                 conf=args.conf or 0.35,
                 iou=args.iou or 0.5,
                 augment=args.augment,
                 half=not args.no_half,
-                camera_mount=args.camera_mount
+                camera_mount=args.camera_mount,
+                target_fps=args.target_fps,
+                show_preview=args.preview,
+                surface_every_n_frames=args.surface_every_n,
+                door_parts_model_path=args.door_parts_model,
+                door_parts_yolov5_dir=args.door_parts_yolov5_dir,
+                door_parts_conf=args.door_parts_conf,
             )
             
-            def handle_decision(ctx, decision):
-                """Callback for vision system decisions."""
+            def handle_frame_decision(ctx, decision):
+                """Callback for per-frame decisions with the real route context."""
                 if self.interface and not self.stop_event.is_set():
-                    self.interface.process_decision(decision, ctx)
+                    return self.interface.process_decision(decision, ctx)
+                return False
             
             self.vision = VisionSystem(
                 config=vision_config,
-                on_frame_decision=handle_decision,
+                on_decision=None,
                 route_provider=lambda: self.route_state,
+                on_frame_decision=handle_frame_decision,
             )
             
             # Start hardware sensor listeners if available
@@ -206,7 +224,7 @@ class NavigationApp:
 
         # Speak the prompt
         if self.interface:
-            self.interface.speak_info(prompt)
+            self.interface.speak_info(prompt, force=True)
             timeout = time.time() + 15.0
             if hasattr(self.interface.speech, 'is_idle'):
                 while not self.interface.speech.is_idle() and time.time() < timeout:
@@ -262,6 +280,15 @@ class NavigationApp:
         if args.destination:
             return args.destination
 
+        if args.typed_destination:
+            print("\n[system] Enter destination (or 'quit' to exit):")
+            self._speak_status("Enter your destination in the terminal.")
+            try:
+                text = input("> ").strip()
+                return None if text.lower() in ('quit', 'exit', 'q', '') else text
+            except EOFError:
+                return None
+
         # No CLI destination — ask via voice
         result = self._listen_for_destination("Please give a destination.")
         if result:
@@ -275,7 +302,14 @@ class NavigationApp:
         except EOFError:
             return None
 
-    def verify_destination(self, raw_destination: str, lat: Optional[float] = None, lng: Optional[float] = None) -> Optional[dict]:
+    def verify_destination(
+        self,
+        raw_destination: str,
+        lat: Optional[float] = None,
+        lng: Optional[float] = None,
+        *,
+        text_confirmation: bool = False,
+    ) -> Optional[dict]:
         """
         Look up the destination on Google Maps, announce it via audio,
         listen for spoken yes/no confirmation.
@@ -294,7 +328,7 @@ class NavigationApp:
             msg = f"Sorry, I could not find {raw_destination}. Please try again."
             print(f"[system] {msg}")
             if self.interface:
-                self.interface.speak_warning(msg)
+                self.interface.speak_warning(msg, force=True)
                 time.sleep(3)
             return None
 
@@ -303,7 +337,7 @@ class NavigationApp:
         print(f"[system] {confirm_msg}")
 
         if self.interface:
-            self.interface.speak_info(confirm_msg)
+            self.interface.speak_info(confirm_msg, force=True)
             timeout = time.time() + 15.0
             if hasattr(self.interface.speech, 'is_idle'):
                 while not self.interface.speech.is_idle() and time.time() < timeout:
@@ -313,20 +347,119 @@ class NavigationApp:
             self.interface.speech.clear_queues()
 
         # Listen for yes/no using the robust sounddevice verifier
-        confirmed = get_voice_confirmation()
+        confirmed = get_text_confirmation() if text_confirmation else get_voice_confirmation()
 
         if confirmed:
             print(f"[system] ✓ Destination confirmed: {result['name']} | {result['address']} | lat={result['lat']} lng={result['lng']}")
             if self.interface:
-                self.interface.speak_info(f"Great. Starting navigation to {result['name']}.")
+                self.interface.speak_info(f"Great. Starting navigation to {result['name']}.", force=True)
                 time.sleep(2)
             return result
         else:
             print("[system] Destination rejected. Please try again.")
             if self.interface:
-                self.interface.speak_info("OK, let me know where you would like to go.")
+                self.interface.speak_info("OK, let me know where you would like to go.", force=True)
                 time.sleep(2)
             return None
+
+    def preflight_camera(self, camera_index: int) -> bool:
+        """Check camera availability before starting route state and navigation."""
+        try:
+            import cv2
+        except Exception as exc:
+            print(f"[camera] OpenCV is not available: {exc}")
+            return False
+
+        cap = None
+        try:
+            if sys.platform == "darwin":
+                cap = cv2.VideoCapture(camera_index, cv2.CAP_AVFOUNDATION)
+            else:
+                cap = cv2.VideoCapture(camera_index)
+
+            if not cap.isOpened():
+                self._print_camera_help(camera_index)
+                return False
+
+            ok, _frame = cap.read()
+            if not ok:
+                print(f"[camera] Webcam index {camera_index} opened, but no frame could be read.")
+                self._print_camera_help(camera_index)
+                return False
+            return True
+        finally:
+            if cap is not None:
+                cap.release()
+
+    def _print_camera_help(self, camera_index: int) -> None:
+        print(f"[camera] Could not open webcam index {camera_index}.")
+        if sys.platform == "darwin":
+            print(
+                "[camera] macOS is blocking camera access. Open System Settings > "
+                "Privacy & Security > Camera, then enable the app that launched this "
+                "command, such as Terminal, iTerm, VS Code, or Codex."
+            )
+            print("[camera] If the app never appears there, run: tccutil reset Camera")
+        else:
+            print("[camera] Check that the camera is connected, not in use, and that this process has permission.")
+
+    def _speak_route_instruction(self, message: str) -> None:
+        print(f"[spoken-route] {message}")
+        if self.interface:
+            self.interface.speak_guidance(message, force=True)
+
+    def _speak_status(self, message: str) -> None:
+        print(f"[spoken-status] {message}")
+        if self.interface:
+            self.interface.speak_info(message, force=True)
+
+    def _wait_for_speech_idle(self, timeout_s: float = 12.0) -> None:
+        if not self.interface or not hasattr(self.interface.speech, "is_idle"):
+            time.sleep(min(timeout_s, 2.0))
+            return
+        deadline = time.time() + timeout_s
+        while time.time() < deadline and not self.interface.speech.is_idle():
+            time.sleep(0.1)
+
+    @staticmethod
+    def _initial_route_instruction(destination_name: str, indoor_start: str) -> str:
+        if str(indoor_start).lower().strip() in {"yes", "true", "1"}:
+            return "Leave the room first. Stand still, turn 360 degrees slowly, and scan for a door or exit sign."
+        return f"Head toward {destination_name}."
+
+    def _start_route_guidance(
+        self,
+        args,
+        destination_name: str,
+        destination_address: str,
+        route_start_fix,
+    ) -> None:
+        """Start route state and speak the first route instruction before camera preflight."""
+        if self.interface:
+            self.interface.set_destination(destination_name)
+
+        if args.laptop_route and self.route_session:
+            route_query = destination_address or destination_name
+            try:
+                self.route_session.start(
+                    destination_name,
+                    route_query,
+                    indoor_start=args.indoor_start,
+                    start_fix=route_start_fix,
+                )
+                return
+            except Exception as exc:
+                print(f"[route] Laptop route setup failed: {exc}")
+
+        starts_indoor = str(args.indoor_start).lower().strip() in {"yes", "true", "1"}
+        self.route_state.active = True
+        self.route_state.destination = destination_name
+        self.route_state.mapping_state = "pending" if starts_indoor else "done"
+        self.route_state.exit_seeking = starts_indoor
+        self.route_state.off_route = False
+        self.route_state.next_turn_distance_m = None
+        self.route_state.next_instruction = self._initial_route_instruction(destination_name, args.indoor_start)
+        self._speak_route_instruction(self.route_state.next_instruction)
 
     def run(self, args) -> int:
         """Main application loop."""
@@ -342,13 +475,15 @@ class NavigationApp:
 
         try:
             while not self.stop_event.is_set():
-                # Try to fetch GPS location to bias the search (5 mile radius)
+                # Try to fetch GPS location to bias the search and seed laptop routing.
                 current_lat = None
                 current_lng = None
-                if not args.destination:
+                route_start_fix = None
+                if args.laptop_route:
                     try:
                         import location_service
                         loc = location_service.get_current_location(timeout_s=5.0)
+                        route_start_fix = loc
                         current_lat = loc.latitude
                         current_lng = loc.longitude
                         print(f"[system] GPS bias acquired: {current_lat}, {current_lng}")
@@ -365,10 +500,23 @@ class NavigationApp:
                 # Keep asking until user verbally confirms
                 destination_data = None
                 while destination_data is None and not self.stop_event.is_set():
-                    destination_data = self.verify_destination(raw_destination, lat=current_lat, lng=current_lng)
+                    destination_data = self.verify_destination(
+                        raw_destination,
+                        lat=current_lat,
+                        lng=current_lng,
+                        text_confirmation=args.typed_destination,
+                    )
                     if destination_data is None:
                         # Ask for a new destination
-                        raw_destination = self._listen_for_destination("Please give a destination.")
+                        if args.typed_destination:
+                            print("\n[system] Enter destination (or 'quit' to exit):")
+                            try:
+                                typed = input("> ").strip()
+                                raw_destination = None if typed.lower() in ("quit", "exit", "q", "") else typed
+                            except EOFError:
+                                raw_destination = None
+                        else:
+                            raw_destination = self._listen_for_destination("Please give a destination.")
                         if raw_destination is None:
                             # Voice failed — text fallback
                             print("\n[system] Enter destination (or 'quit' to exit):")
@@ -393,60 +541,27 @@ class NavigationApp:
                 print(f"\n[system] Starting navigation to: {destination_name}")
                 print(f"[system]   Address : {destination_address}")
                 print(f"[system]   Coords  : lat={destination_lat}, lng={destination_lng}")
+                self._speak_status(f"Starting navigation to {destination_name}.")
 
-                # Plan the route using the professional NavigationPlanner
-                try:
-                    from address_navigation import NavigationPlanner, LegType
-                    from gps_location import GPSCoords
-                    
-                    ors_key = (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip() or None
-                    indoor_layout = os.environ.get("INDOOR_LAYOUT_JSON")
-                    planner = NavigationPlanner(
-                        ors_key=ors_key,
-                        indoor_graph_path=indoor_layout,
-                    )
-                    
-                    # Prepare origin and destination data
-                    origin_gps = None
-                    if current_lat and current_lng:
-                        origin_gps = GPSCoords(latitude=current_lat, longitude=current_lng)
-                    
-                    dest_gps = None
-                    if destination_lat and destination_lng:
-                        dest_gps = GPSCoords(latitude=destination_lat, longitude=destination_lng)
-                    
-                    # Generate the plan
-                    plan = planner.plan("Your current location", destination_name, origin_gps=origin_gps, dest_gps=dest_gps)
-                    
-                    # Initialize route state
-                    self.route_state.active = True
-                    self.route_state.destination = destination_name
-                    
-                    # If we have specific steps, use the first one
-                    all_steps = plan.all_steps()
-                    if all_steps:
-                        self.route_state.next_instruction = all_steps[0]
-                    else:
-                        self.route_state.next_instruction = f"Head toward {destination_name}."
-                    
-                    # Trigger 360-degree mapping if starting indoors
-                    if plan.origin_is_indoor:
-                        self.route_state.mapping_state = "pending"
-                        print("[system] Starting indoors. Mapping required.")
-                    else:
-                        self.route_state.mapping_state = "done"
-                        
-                except Exception as e:
-                    print(f"[system] Routing plan failed: {e}")
-                    # Fallback to simple navigation
-                    self.route_state.active = True
-                    self.route_state.destination = destination_name
-                    self.route_state.mapping_state = "pending"  # Always map as fallback
-                    self.route_state.next_instruction = f"Head toward {destination_name}."
+                # Initialize and speak route guidance before camera preflight so
+                # blocked camera permission cannot skip the route announcement.
+                self._start_route_guidance(args, destination_name, destination_address, route_start_fix)
+                self._wait_for_speech_idle(timeout_s=14.0)
+
+                if not self.preflight_camera(args.camera):
+                    blocked_msg = "Camera is blocked. Enable camera permission for Terminal, then run again."
+                    print("[system] Camera preflight failed. Fix camera permission and run the command again.")
+                    if self.interface:
+                        self.interface.speak_warning(blocked_msg, force=True)
+                        time.sleep(2)
+                    if self.route_session:
+                        self.route_session.stop()
+                    return 1
 
                 # NOW start vision + obstacle detection
                 print("[system] Starting vision system...")
                 print("[system] Press Ctrl+C to stop")
+                self._speak_status("Camera guidance is starting. I will speak immediate alerts first, otherwise route directions.")
 
                 try:
                     frames = self.vision.run_forever(
@@ -460,9 +575,15 @@ class NavigationApp:
                     break
 
                 self.interface.clear_destination()
+                if self.route_session:
+                    self.route_session.stop()
                 self.confirmed_destination = None
-                print("\n[system] Navigation ended. Set a new destination or Ctrl+C to quit")
-                args.destination = None
+                if args.continuous:
+                    print("\n[system] Navigation ended. Set a new destination or Ctrl+C to quit")
+                    args.destination = None
+                else:
+                    print("\n[system] Navigation ended. Exiting.")
+                    break
                 
         except Exception as e:
             print(f"\n[error] Runtime error: {e}")
@@ -485,8 +606,10 @@ class NavigationApp:
         self.is_running = False
         
         if self.interface:
-            self.interface.speak_info("Shutting down. Goodbye.")
+            self.interface.speak_info("Shutting down. Goodbye.", force=True)
             self.interface.stop()
+        if self.route_session:
+            self.route_session.stop()
         
         print("[system] Shutdown complete")
         
@@ -544,6 +667,11 @@ Examples:
         default="en_US",
         help="Speech recognition locale (default: en_US)"
     )
+    input_group.add_argument(
+        "--continuous",
+        action="store_true",
+        help="After navigation ends, prompt for another destination instead of exiting.",
+    )
     
     # User preferences
     pref_group = parser.add_argument_group("User Preferences")
@@ -564,6 +692,12 @@ Examples:
         type=float,
         default=None,
         help="Speech speed multiplier (0.5 to 1.5)"
+    )
+    pref_group.add_argument(
+        "--speech-engine",
+        choices=["system", "elevenlabs"],
+        default="system",
+        help="Speech engine for live guidance. 'system' is low-latency and single-voice; 'elevenlabs' is higher quality but slower.",
     )
     
     # Vision options
@@ -599,6 +733,23 @@ Examples:
         help="Inference image size"
     )
     vision_group.add_argument(
+        "--target-fps",
+        type=float,
+        default=6.0,
+        help="Maximum processed camera frames per second (default: 6).",
+    )
+    vision_group.add_argument(
+        "--surface-every-n",
+        type=int,
+        default=3,
+        help="Run expensive surface/door heuristics every N frames, except during indoor exit scans.",
+    )
+    vision_group.add_argument(
+        "--preview",
+        action="store_true",
+        help="Show the OpenCV preview window. Disabled by default to reduce laptop lag.",
+    )
+    vision_group.add_argument(
         "--no-half",
         action="store_true",
         help="Disable half-precision inference"
@@ -615,6 +766,24 @@ Examples:
         choices=["head", "hand"],
         help="Camera mount position: 'head' for glasses/head-mounted, 'hand' for phone (default: hand)."
     )
+    vision_group.add_argument(
+        "--door-parts-model",
+        type=str,
+        default=os.environ.get("DOOR_PARTS_MODEL_PATH"),
+        help="Optional YOLOv5 door-parts .pt model with a 'handle' class, such as Joechencc/Door_detection yolov5/best.pt.",
+    )
+    vision_group.add_argument(
+        "--door-parts-yolov5-dir",
+        type=str,
+        default=os.environ.get("DOOR_PARTS_YOLOV5_DIR"),
+        help="Local YOLOv5 checkout directory required for --door-parts-model weights.",
+    )
+    vision_group.add_argument(
+        "--door-parts-conf",
+        type=float,
+        default=float(os.environ.get("DOOR_PARTS_CONF", "0.40")),
+        help="Confidence threshold for the optional YOLOv5 door-parts model.",
+    )
 
     # Address-to-address navigation
     nav_group = parser.add_argument_group("Address Navigation")
@@ -629,6 +798,30 @@ Examples:
         type=str,
         default=None,
         help="Destination address for address-to-address navigation",
+    )
+    nav_group.add_argument(
+        "--no-laptop-route",
+        dest="laptop_route",
+        action="store_false",
+        help="Disable laptop live route loading; keep camera obstacle guidance only.",
+    )
+    nav_group.add_argument(
+        "--indoor-start",
+        choices=["auto", "yes", "no"],
+        default="auto",
+        help="Whether to begin with 360-degree indoor door/exit seeking (default: auto).",
+    )
+    nav_group.add_argument(
+        "--arrival-radius-m",
+        type=float,
+        default=14.0,
+        help="Meters from a route step endpoint before advancing to the next step.",
+    )
+    nav_group.add_argument(
+        "--route-poll-seconds",
+        type=float,
+        default=3.0,
+        help="Seconds between laptop location polls while navigating.",
     )
     
     return parser
@@ -647,8 +840,8 @@ def main():
             ors_key = (os.environ.get("OPENROUTESERVICE_API_KEY") or "").strip() or None
             indoor_layout = os.environ.get("INDOOR_LAYOUT_JSON")
             planner = NavigationPlanner(
-                ors_api_key=ors_key,
-                indoor_layout_path=indoor_layout,
+                ors_key=ors_key,
+                indoor_graph_path=indoor_layout,
             )
             plan = planner.plan(args.from_address, args.to_address)
             print(f"\n{'=' * 60}")

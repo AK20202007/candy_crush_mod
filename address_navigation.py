@@ -37,7 +37,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
-from gps_location import GPSCoords, _query_overpass, parse_gps
+from location_service import LocationFix as GPSCoords, is_indoors
 from routing import geocode as ors_geocode
 
 
@@ -190,7 +190,7 @@ def _geocode(query: str, ors_key: Optional[str] = None) -> Optional[Tuple[float,
 def _is_indoor_coords(lat: float, lon: float) -> bool:
     """Check if coordinates fall inside a building via Overpass API."""
     try:
-        return _query_overpass(lat, lon, timeout_s=8)
+        return is_indoors(lat, lon, timeout_s=8)
     except Exception:
         return False
 
@@ -205,10 +205,10 @@ def _exit_seeking_steps() -> List[str]:
     The agent will instruct the user to locate a safe exit path.
     """
     return [
-        "You need to exit the building first.",
-        "Slowly turn to your right and scan for an exit sign or open passage.",
-        "If you feel a wall, trail your hand along it toward the nearest exit path.",
-        "When an exit is detected, the system will guide you toward it.",
+        "You need to leave this room or building first.",
+        "Stand still, slowly turn 360 degrees, and scan for a door or exit sign.",
+        "If no door is visible, move to the nearest wall and trail your hand along it.",
+        "When a door is detected, I will guide you to the handle and tell you when to pass through.",
         "After exiting, outdoor navigation will begin.",
     ]
 
