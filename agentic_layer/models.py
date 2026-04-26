@@ -268,6 +268,8 @@ class RouteState(Serializable):
     destination: Optional[str] = None
     next_instruction: Optional[str] = None
     next_turn_distance_m: Optional[float] = None
+    pending_outdoor_instruction: Optional[str] = None
+    pending_outdoor_distance_m: Optional[float] = None
     off_route: bool = False
     exit_seeking: bool = False
     mapping_state: str = "done"
@@ -280,6 +282,8 @@ class RouteState(Serializable):
             destination=data.get("destination"),
             next_instruction=data.get("next_instruction"),
             next_turn_distance_m=data.get("next_turn_distance_m"),
+            pending_outdoor_instruction=data.get("pending_outdoor_instruction"),
+            pending_outdoor_distance_m=data.get("pending_outdoor_distance_m"),
             off_route=bool(data.get("off_route", False)),
             exit_seeking=bool(data.get("exit_seeking", False)),
             mapping_state=str(data.get("mapping_state", "done")),

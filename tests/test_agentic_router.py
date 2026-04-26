@@ -680,6 +680,30 @@ def test_route_guidance_uses_walking_steps_not_feet() -> None:
     assert "feet" not in decision.message
 
 
+def test_indoor_route_guidance_includes_pending_outdoor_step() -> None:
+    router = AgenticNavigationRouter()
+    ctx = _ctx(
+        route=RouteState(
+            active=True,
+            destination="library",
+            next_instruction="Leave the room first",
+            exit_seeking=True,
+            pending_outdoor_instruction="Turn left on Bruin Walk",
+            pending_outdoor_distance_m=7.5,
+        ),
+        motion=MotionState(is_moving=True, speed_mps=0.5),
+        scene=SceneState(location_type="room", visual_confidence=0.9),
+    )
+
+    decision = router.decide(ctx)
+
+    assert decision.action == AgentAction.GUIDE
+    assert "Leave the room first" in decision.message
+    assert "After you are outside" in decision.message
+    assert "Turn left on Bruin Walk" in decision.message
+    assert "in about 10 steps" in decision.message
+
+
 def test_indoor_exit_guidance_tells_user_to_scan_for_door() -> None:
     router = AgenticNavigationRouter()
     ctx = _ctx(
@@ -718,6 +742,7 @@ def main() -> None:
     test_wall_surface_warns_as_obstacle()
     test_stationary_wall_surface_is_spoken_as_orientation()
     test_route_guidance_uses_walking_steps_not_feet()
+    test_indoor_route_guidance_includes_pending_outdoor_step()
     test_indoor_exit_guidance_tells_user_to_scan_for_door()
     test_far_person_and_stop_sign_stop_sign_wins()
     test_far_person_and_stop_sign_with_target_query_stop_sign_still_wins()

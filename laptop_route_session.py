@@ -80,6 +80,7 @@ class LaptopRouteSession:
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._outdoor_start_announced = False
+        self._last_exit_route_reminder = 0.0
 
     def start(
         self,
@@ -100,6 +101,7 @@ class LaptopRouteSession:
         self._hits = 0
         self._steps = []
         self._outdoor_start_announced = False
+        self._last_exit_route_reminder = 0.0
 
         fix = start_fix or location_service.get_current_location(timeout_s=6.0)
         source_note = f" via {fix.source}" if fix.source else ""
@@ -131,16 +133,16 @@ class LaptopRouteSession:
         self.route_state.destination = destination_name
         self.route_state.next_instruction = first_instruction
         self.route_state.next_turn_distance_m = None if starts_indoor else self._distance_to_current_step(fix)
+        self.route_state.pending_outdoor_instruction = outdoor_instruction if starts_indoor else None
+        self.route_state.pending_outdoor_distance_m = self._distance_to_current_step(fix) if starts_indoor and self._steps else None
         self.route_state.off_route = False
         self.route_state.exit_seeking = starts_indoor
         self.route_state.mapping_state = "pending" if starts_indoor else "done"
 
         if starts_indoor:
             print("[route] Start appears indoors; camera router will ask for a 360-degree scan and seek a door.")
-            self._announce(
-                "Route loaded. You appear to be indoors, so I will guide you out of this room first. "
-                "Stand still, turn 360 degrees slowly, and scan for a door or exit sign."
-            )
+            self._announce(self._indoor_start_message())
+            self._last_exit_route_reminder = time.time()
         else:
             self._announce(
                 self._instruction_message(
@@ -162,6 +164,8 @@ class LaptopRouteSession:
             self.route_state.destination = None
             self.route_state.next_instruction = None
             self.route_state.next_turn_distance_m = None
+            self.route_state.pending_outdoor_instruction = None
+            self.route_state.pending_outdoor_distance_m = None
             self.route_state.off_route = False
             self.route_state.exit_seeking = False
             self.route_state.mapping_state = "done"
@@ -187,6 +191,7 @@ class LaptopRouteSession:
     def _progress_loop(self) -> None:
         while not self._stop_event.is_set() and self.route_state.active and self._idx < len(self._steps):
             if self.route_state.exit_seeking:
+                self._refresh_pending_outdoor_route()
                 time.sleep(self.poll_seconds)
                 continue
 
@@ -205,6 +210,8 @@ class LaptopRouteSession:
 
             if not self._outdoor_start_announced:
                 self.route_state.next_instruction = self._steps[self._idx].instruction
+                self.route_state.pending_outdoor_instruction = None
+                self.route_state.pending_outdoor_distance_m = None
                 self._announce(self._instruction_message(prefix="Outdoor route starting. First direction:", fix=fix))
                 self._outdoor_start_announced = True
 
@@ -241,6 +248,34 @@ class LaptopRouteSession:
         if distance is not None:
             distance_text = f" {_walking_steps_phrase(distance)}"
         return f"{prefix} {instruction}{distance_text}."
+
+    def _indoor_start_message(self) -> str:
+        message = (
+            "Route loaded. You appear to be indoors. First, leave this room: "
+            "stand still, turn 360 degrees slowly, and scan for a door or exit sign."
+        )
+        if self.route_state.pending_outdoor_instruction:
+            distance_text = ""
+            if self.route_state.pending_outdoor_distance_m is not None:
+                distance_text = f" {_walking_steps_phrase(self.route_state.pending_outdoor_distance_m)}"
+            message += f" After you are outside, first outdoor direction: {self.route_state.pending_outdoor_instruction}{distance_text}."
+        return message
+
+    def _refresh_pending_outdoor_route(self) -> None:
+        if not self._steps or self._idx >= len(self._steps):
+            return
+        self.route_state.pending_outdoor_instruction = self._steps[self._idx].instruction
+        try:
+            fix = location_service.get_current_location(timeout_s=max(2.0, self.poll_seconds))
+            self.route_state.pending_outdoor_distance_m = self._distance_to_current_step(fix)
+        except Exception as exc:
+            print(f"[route] Indoor route distance refresh failed: {exc}")
+
+        now = time.time()
+        if now - self._last_exit_route_reminder < max(10.0, self.poll_seconds * 2.0):
+            return
+        self._last_exit_route_reminder = now
+        self._announce(self._indoor_start_message())
 
     def _announce(self, message: str) -> None:
         if not self.on_instruction:

@@ -961,6 +961,7 @@ class VisionSystem:
             attrs = dict(handle)
             attrs["has_frame"] = True
             attrs["door_frame"] = frame_context
+            attrs["clear_handle"] = float(handle["confidence"]) >= 0.72
             attrs["note"] = "possible doorway with handle-like feature; verify by touch"
 
             candidate = SurfaceObservation(
@@ -978,6 +979,7 @@ class VisionSystem:
             attrs = dict(handle)
             attrs["has_frame"] = False
             attrs["wall_context"] = wall_context.model_dump()
+            attrs["clear_handle"] = float(handle["confidence"]) >= 0.74 and wall_context.confidence >= 0.66
             attrs["note"] = "wall-like surface with handle-like feature; possible door, verify by touch"
 
             candidate = SurfaceObservation(
@@ -1018,7 +1020,8 @@ class VisionSystem:
             self._door_candidate_key = key
             self._consec_door_hits = 0
         self._consec_door_hits = getattr(self, "_consec_door_hits", 0) + 1
-        if self._consec_door_hits < 3:
+        required_hits = 2 if bool(candidate.attributes.get("clear_handle")) and candidate.confidence >= 0.82 else 3
+        if self._consec_door_hits < required_hits:
             return None
         return candidate
 
@@ -1147,7 +1150,12 @@ class VisionSystem:
         )
         if lines is None:
             horizontal = self._detect_horizontal_lever_handle(frame, w, h, crop, x_start, y_start)
-            return horizontal or self._detect_vertical_pull_handle(frame, w, h, crop, x_start, y_start)
+            if horizontal is not None:
+                return horizontal
+            vertical = self._detect_vertical_pull_handle(frame, w, h, crop, x_start, y_start)
+            if vertical is not None:
+                return vertical
+            return self._detect_round_knob_handle(frame, w, h, crop, x_start, y_start)
 
         global_lines = []
         for raw in lines[:, 0]:
@@ -1212,7 +1220,10 @@ class VisionSystem:
         horizontal = self._detect_horizontal_lever_handle(frame, w, h, crop, x_start, y_start)
         if horizontal is not None:
             return horizontal
-        return self._detect_vertical_pull_handle(frame, w, h, crop, x_start, y_start)
+        vertical = self._detect_vertical_pull_handle(frame, w, h, crop, x_start, y_start)
+        if vertical is not None:
+            return vertical
+        return self._detect_round_knob_handle(frame, w, h, crop, x_start, y_start)
 
     def _detect_horizontal_lever_handle(
         self,
@@ -1334,6 +1345,89 @@ class VisionSystem:
                 best_score = score
         return best
 
+    def _detect_round_knob_handle(
+        self,
+        frame: np.ndarray,
+        w: int,
+        h: int,
+        crop: np.ndarray,
+        x_start: int,
+        y_start: int,
+    ) -> Optional[Dict[str, object]]:
+        gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        gray = cv2.GaussianBlur(gray, (5, 5), 0)
+        hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+
+        edges = cv2.Canny(gray, 45, 135)
+        low_sat = hsv[:, :, 1] < 115
+        visible_value = (hsv[:, :, 2] > 65) & (hsv[:, :, 2] < 250)
+        material_mask = (low_sat & visible_value).astype(np.uint8) * 255
+        material_mask = cv2.bitwise_and(material_mask, cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1))
+        material_mask = cv2.morphologyEx(material_mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=1)
+        contours, _ = cv2.findContours(material_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+        best: Optional[Dict[str, object]] = None
+        best_score = 0.0
+        for contour in contours:
+            area = float(cv2.contourArea(contour))
+            if area <= 0:
+                continue
+            x, y, cw, ch = cv2.boundingRect(contour)
+            if cw <= 0 or ch <= 0:
+                continue
+            width_ratio = cw / max(1.0, float(w))
+            height_ratio = ch / max(1.0, float(h))
+            if not (0.018 <= width_ratio <= 0.11 and 0.018 <= height_ratio <= 0.13):
+                continue
+
+            aspect = cw / max(1.0, float(ch))
+            if not (0.62 <= aspect <= 1.45):
+                continue
+
+            perimeter = float(cv2.arcLength(contour, True))
+            if perimeter <= 0:
+                continue
+            circularity = min(1.0, 4.0 * np.pi * area / (perimeter * perimeter))
+            if circularity < 0.48:
+                continue
+
+            gx1, gy1 = x + x_start, y + y_start
+            gx2, gy2 = gx1 + cw, gy1 + ch
+            cx = (gx1 + gx2) / 2.0
+            cy = (gy1 + gy2) / 2.0
+            x_ratio = cx / max(1.0, float(w))
+            y_ratio = cy / max(1.0, float(h))
+            if not (0.34 <= y_ratio <= 0.86):
+                continue
+
+            roi = frame[max(0, gy1):min(h, gy2), max(0, gx1):min(w, gx2)]
+            if roi.size == 0:
+                continue
+            roi_gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            roi_hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            contrast = min(1.0, float(np.std(roi_gray)) / 45.0)
+            metal_like = float(np.mean(roi_hsv[:, :, 1] < 115))
+            fill_ratio = min(1.0, area / max(1.0, float(cw * ch)))
+            size_score = min(1.0, max(width_ratio / 0.06, height_ratio / 0.08))
+            score = min(0.88, 0.24 + circularity * 0.24 + contrast * 0.18 + metal_like * 0.12 + fill_ratio * 0.14 + size_score * 0.10)
+            if score < 0.58:
+                continue
+
+            handle = self._door_handle_attributes(
+                confidence=score,
+                bbox=(gx1, gy1, gx2, gy2),
+                center=(cx, cy),
+                frame_width=w,
+                frame_height=h,
+                orientation="round_knob",
+                support_side="unknown",
+                near_field_ratio=min(1.0, max(width_ratio / 0.08, height_ratio / 0.09)),
+            )
+            if score > best_score:
+                best = handle
+                best_score = score
+        return best
+
     @staticmethod
     def _door_handle_color_score(frame: np.ndarray, line: tuple[float, float, float, float]) -> float:
         h, w = frame.shape[:2]
@@ -1425,6 +1519,8 @@ class VisionSystem:
 
         if orientation == "lever_horizontal":
             handle_action = "press the lever down, then gently test whether the door pushes or pulls"
+        elif orientation == "round_knob":
+            handle_action = "turn the knob, then gently test whether the door pushes or pulls"
         else:
             handle_action = "feel along the handle plate for the lever or pull, then gently test whether the door pushes or pulls"
 

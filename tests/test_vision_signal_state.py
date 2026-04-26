@@ -123,6 +123,32 @@ def test_wall_plane_detector_finds_wall_like_obstacle() -> None:
     assert obs.attributes["vertical_lines"] >= 2
 
 
+def test_round_door_knob_with_frame_is_confirmed() -> None:
+    frame = np.full((480, 640, 3), (155, 155, 150), dtype=np.uint8)
+    cv2.line(frame, (160, 80), (160, 440), (65, 65, 65), 5)
+    cv2.line(frame, (500, 80), (500, 440), (65, 65, 65), 5)
+    cv2.line(frame, (160, 82), (500, 82), (75, 75, 75), 4)
+    cv2.circle(frame, (438, 275), 18, (210, 210, 200), -1)
+    cv2.circle(frame, (438, 275), 18, (70, 70, 65), 3)
+    cv2.circle(frame, (432, 269), 5, (245, 245, 235), -1)
+
+    vision = object.__new__(VisionSystem)
+    vision._cfg = VisionConfig(camera_mount="hand")
+    vision._consec_door_hits = 0
+    vision._door_candidate_key = None
+
+    obs = None
+    for _ in range(3):
+        obs = vision._detect_door(frame, 640, 480)
+
+    assert obs is not None
+    assert obs.kind == SurfaceKind.DOOR
+    assert obs.source == "vision-door-handle"
+    assert obs.attributes["handle_orientation"] == "round_knob"
+    assert obs.attributes["clear_handle"] is True
+    assert "turn the knob" in obs.attributes["handle_action"]
+
+
 def main() -> None:
     test_green_traffic_light_crop_is_categorized()
     test_red_traffic_light_crop_is_categorized()
@@ -131,6 +157,7 @@ def main() -> None:
     test_detection_from_bbox_marks_frame_edge_partial()
     test_door_handle_like_pattern_is_not_confirmed_doorway()
     test_wall_plane_detector_finds_wall_like_obstacle()
+    test_round_door_knob_with_frame_is_confirmed()
     print("vision signal state tests passed")
 
 

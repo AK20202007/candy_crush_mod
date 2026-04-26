@@ -123,6 +123,22 @@ def _walking_steps_phrase(distance_m: Optional[float]) -> str:
     return f"in about {steps} {unit}"
 
 
+def _route_instruction_message(ctx: FrameContext) -> str:
+    route = ctx.route
+    instruction = route.next_instruction or "Continue toward your destination"
+    distance = ""
+    if route.next_turn_distance_m is not None:
+        distance = f" {_walking_steps_phrase(route.next_turn_distance_m)}"
+    message = f"{instruction}{distance}."
+    if getattr(route, "exit_seeking", False) and getattr(route, "pending_outdoor_instruction", None):
+        outdoor_distance = ""
+        pending_distance = getattr(route, "pending_outdoor_distance_m", None)
+        if pending_distance is not None:
+            outdoor_distance = f" {_walking_steps_phrase(pending_distance)}"
+        message += f" After you are outside, first outdoor direction: {route.pending_outdoor_instruction}{outdoor_distance}."
+    return message
+
+
 def _speed_phrase(speed_mps: float) -> str:
     """Convert speed in m/s to human-readable phrase."""
     if speed_mps < 1.0:
@@ -675,10 +691,6 @@ class WayfindingAgent(BaseAgent):
                 debug={"route": ctx.route.model_dump()},
             )
         if ctx.route.next_instruction:
-            distance = ""
-            if ctx.route.next_turn_distance_m is not None:
-                distance = f" {_walking_steps_phrase(ctx.route.next_turn_distance_m)}"
-            
             # Periodically boost priority so navigation breaks through
             # low-value scan/orientation prompts. Safety (>=90) still overrides.
             is_boost_frame = (WayfindingAgent._frame_counter % self._NAV_BOOST_EVERY == 0)
@@ -690,7 +702,7 @@ class WayfindingAgent(BaseAgent):
             return AgentDecision(
                 action=AgentAction.GUIDE,
                 priority=priority,
-                message=f"{ctx.route.next_instruction}{distance}.",
+                message=_route_instruction_message(ctx),
                 haptic=HapticPattern.NONE,
                 agents_consulted=[self.name],
                 debug={
@@ -927,9 +939,20 @@ def _best_clear_door_handle_surface(ctx: FrameContext) -> Optional[SurfaceObserv
         if (
             s.kind == SurfaceKind.DOOR
             and bool(s.attributes.get("handle_detected"))
+            and bool(s.attributes.get("clear_handle", True))
             and s.source in {"vision-door-handle", "vision-wall-handle-candidate"}
-            and s.confidence >= 0.76
-            and float(s.attributes.get("handle_confidence", s.confidence) or 0.0) >= 0.70
+            and (
+                (
+                    s.source == "vision-door-handle"
+                    and s.confidence >= 0.80
+                    and float(s.attributes.get("handle_confidence", s.confidence) or 0.0) >= 0.74
+                )
+                or (
+                    s.source == "vision-wall-handle-candidate"
+                    and s.confidence >= 0.76
+                    and float(s.attributes.get("handle_confidence", s.confidence) or 0.0) >= 0.72
+                )
+            )
         )
     ]
     if not candidates:

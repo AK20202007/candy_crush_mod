@@ -27,6 +27,21 @@ def _walking_steps_phrase(distance_m: Optional[float]) -> str:
     return f"in about {steps} {unit}"
 
 
+def _route_message(route) -> str:
+    instruction = route.next_instruction or "Continue toward your destination"
+    distance = ""
+    if route.next_turn_distance_m is not None:
+        distance = f" {_walking_steps_phrase(route.next_turn_distance_m)}"
+    message = f"{instruction}{distance}."
+    if getattr(route, "exit_seeking", False) and getattr(route, "pending_outdoor_instruction", None):
+        outdoor_distance = ""
+        pending_distance = getattr(route, "pending_outdoor_distance_m", None)
+        if pending_distance is not None:
+            outdoor_distance = f" {_walking_steps_phrase(pending_distance)}"
+        message += f" After you are outside, first outdoor direction: {route.pending_outdoor_instruction}{outdoor_distance}."
+    return message
+
+
 class NavigationInterface:
     """
     Main interface integrating vision, routing, and intelligent user feedback.
@@ -127,7 +142,7 @@ class NavigationInterface:
             else:
                 self._consecutive_same_decisions = 0
         
-        if success and decision.action == AgentAction.GUIDE and ctx.route and ctx.route.next_instruction:
+        if success and self._is_route_guidance(decision, ctx):
             self._last_route_prompt_ms = now_ms
 
         if success:
@@ -144,20 +159,23 @@ class NavigationInterface:
         if now_ms - self._last_route_prompt_ms < interval_ms:
             return False
 
-        is_idle = getattr(self.speech, "is_idle", lambda: True)
-        if not is_idle():
-            return False
-
-        distance = ""
-        if route.next_turn_distance_m is not None:
-            distance = f" {_walking_steps_phrase(route.next_turn_distance_m)}"
-        message = f"{route.next_instruction}{distance}."
+        message = _route_message(route)
         success = self.speech.speak_guidance(message, force=True)
         if success:
             self._last_route_prompt_ms = now_ms
             self._last_spoken_message = message
             self._last_decision_time_ms = now_ms
         return success
+
+    @staticmethod
+    def _is_route_guidance(decision: AgentDecision, ctx: FrameContext) -> bool:
+        if not ctx.route or not ctx.route.active or not ctx.route.next_instruction:
+            return False
+        if decision.action != AgentAction.GUIDE:
+            return False
+        if "wayfinding" in decision.agents_consulted:
+            return True
+        return decision.message.strip() == _route_message(ctx.route).strip()
     
     def _update_state_from_context(self, ctx: FrameContext) -> None:
         """Update UI state based on frame context."""
