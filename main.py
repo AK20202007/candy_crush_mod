@@ -184,11 +184,16 @@ class NavigationApp:
         Speak a prompt then record audio and transcribe via ElevenLabs STT.
         Returns the transcribed text or None on failure.
         """
-        import sounddevice as sd
-        import numpy as np
-        import wave
-        import tempfile
         import requests
+        try:
+            import speech_recognition as sr
+        except ImportError:
+            print("[system] SpeechRecognition module not available, using text input")
+            print(f"[system] {prompt}")
+            try:
+                return input("> ").strip() or None
+            except EOFError:
+                return None
 
         api_key = os.environ.get("ELEVENLABS_API_KEY", "")
         if not api_key:
@@ -205,47 +210,45 @@ class NavigationApp:
             time.sleep(4)  # Wait for TTS to finish fully
             self.interface.speech.clear_queues()
 
-        try:
-            sd.stop()
-        except Exception:
-            pass
-        time.sleep(0.3)
+        recognizer = sr.Recognizer()
+        recognizer.energy_threshold = 300
+        recognizer.dynamic_energy_threshold = True
 
         print(f"\n[system] 🎤 Listening... (speak now)")
 
-        samplerate = 16000
-        recording = sd.rec(int(samplerate * timeout), samplerate=samplerate, channels=1, dtype=np.int16)
-        sd.wait()
-
-        # Write to temp wav
-        temp_path = tempfile.mktemp(suffix=".wav")
-        with wave.open(temp_path, 'wb') as wf:
-            wf.setnchannels(1)
-            wf.setsampwidth(2)
-            wf.setframerate(samplerate)
-            wf.writeframes(recording.tobytes())
+        try:
+            with sr.Microphone() as source:
+                recognizer.adjust_for_ambient_noise(source, duration=0.2)
+                audio = recognizer.listen(source, timeout=timeout, phrase_time_limit=5)
+                wav_data = audio.get_wav_data()
+        except Exception as e:
+            print(f"[system] Microphone error: {e}")
+            return None
 
         try:
-            with open(temp_path, 'rb') as f:
-                response = requests.post(
-                    "https://api.elevenlabs.io/v1/speech-to-text",
-                    headers={"xi-api-key": api_key},
-                    data={"model_id": "scribe_v1"},
-                    files={"file": f},
-                    timeout=15,
-                    verify=False,  # macOS SSL workaround
-                )
+            response = requests.post(
+                "https://api.elevenlabs.io/v1/speech-to-text",
+                headers={"xi-api-key": api_key},
+                data={"model_id": "scribe_v1"},
+                files={"file": ("audio.wav", wav_data, "audio/wav")},
+                timeout=15,
+                verify=False,  # macOS SSL workaround
+            )
+            import re
             text = response.json().get("text", "").strip() if response.status_code == 200 else ""
-            print(f"[system] Heard: '{text}'")
-            return text if text else None
+            
+            # Clean up ElevenLabs STT hallucinations like "(music)" or "[coughing]"
+            cleaned_text = re.sub(r'\([^)]*\)', '', text)
+            cleaned_text = re.sub(r'\[[^\]]*\]', '', cleaned_text)
+            cleaned_text = cleaned_text.strip()
+            
+            if text != cleaned_text:
+                print(f"[system] Raw Heard: '{text}'")
+            print(f"[system] Heard: '{cleaned_text}'")
+            return cleaned_text if cleaned_text else None
         except Exception as e:
             print(f"[system] STT error: {e}")
             return None
-        finally:
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
 
     def get_destination(self, args) -> Optional[str]:
         """Get raw destination text from CLI arg or via voice/text prompt."""
@@ -296,27 +299,14 @@ class NavigationApp:
             time.sleep(8)  # Wait for full TTS playback
             self.interface.speech.clear_queues()
 
-        # Listen for yes/no
-        response = self._listen_for_destination(
-            "Please say yes to confirm or no to try again.",
-            timeout=4.0
-        )
+        # Speak the prompt
+        if self.interface:
+            self.interface.speak_info("Please say yes to confirm or no to try again.")
+            time.sleep(4)  # Wait for TTS to finish fully
+            self.interface.speech.clear_queues()
 
-        yes_words = {"yes", "yeah", "yep", "correct", "confirm", "ok", "okay", "sure", "right", "affirmative"}
-        no_words = {"no", "nope", "nah", "wrong", "incorrect", "change", "cancel"}
-        text_lower = (response or "").lower()
-
-        confirmed = any(w in text_lower for w in yes_words)
-        rejected = any(w in text_lower for w in no_words)
-
-        if not confirmed and not rejected:
-            # Couldn't understand — fall back to text
-            print("\n[system] Didn't catch that. Type 'yes' to confirm or 'no' to re-enter:")
-            try:
-                typed = input("> ").strip().lower()
-                confirmed = typed in ("yes", "y")
-            except EOFError:
-                confirmed = False
+        # Listen for yes/no using the robust sounddevice verifier
+        confirmed = get_voice_confirmation()
 
         if confirmed:
             print(f"[system] ✓ Destination confirmed: {result['name']} | {result['address']} | lat={result['lat']} lng={result['lng']}")
